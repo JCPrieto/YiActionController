@@ -32,6 +32,8 @@ data class CameraState(
     val pending: Set<Int> = emptySet(),
     val pendingAction: CameraAction? = null,
     val recording: RecordingState = RecordingState.UNKNOWN,
+    val lastRecordingEvent: String? = null,
+    internal val recordingRevision: Long = 0,
     val lastPhotoPath: String? = null,
     val lastPhotoEvent: PhotoEvent? = null,
     val lastRequest: String? = null,
@@ -100,7 +102,10 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
                 next.events + (message.type to eventValue) else next.events,
         )
         next = when (message.type) {
-            "app_status" -> next.copy(recording = recordingFromAppStatus(message.param.text()))
+            "app_status" -> next.withRecordingEvent(recordingFromAppStatus(message.param.text()), raw)
+            "start_video_record" -> next.withRecordingEvent(RecordingState.RECORDING, raw)
+            // Observed after stopping on the reference firmware (return to viewfinder).
+            "vf_start" -> next.withRecordingEvent(RecordingState.IDLE, raw)
             "start_photo_capture" -> next.copy(lastPhotoEvent = PhotoEvent.START_PHOTO_CAPTURE)
             "precise_capture_data_ready" -> next.copy(lastPhotoEvent = PhotoEvent.PRECISE_CAPTURE_DATA_READY)
             "photo_taken" -> next.copy(
@@ -115,10 +120,16 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
     return next
 }
 
+private fun CameraState.withRecordingEvent(value: RecordingState, raw: String) = copy(
+    recording = value,
+    lastRecordingEvent = raw,
+    recordingRevision = recordingRevision + 1,
+)
+
 // Exact app_status values used by the original-YI reference client linked in README.
 // Mode fields and unrelated events must not imply a recording state.
 private fun recordingFromAppStatus(value: String?): RecordingState = when (value) {
-    "idle" -> RecordingState.IDLE
+    "idle", "vf" -> RecordingState.IDLE
     "record", "recording" -> RecordingState.RECORDING
     else -> RecordingState.UNKNOWN
 }

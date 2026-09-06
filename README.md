@@ -46,11 +46,20 @@ inválida» a códigos de error no especificados en el protocolo aportado.
 - `STARTING` y `STOPPING` indican una solicitud pendiente, no un hecho confirmado.
 - Tras aceptar o rechazar iniciar/detener se consulta configuración (`3`) por
   la misma cola. El ACK por sí solo deja el estado en `UNKNOWN`; se conserva
-  una actualización real de `app_status` que haya llegado antes del ACK.
-- `app_status=idle` se interpreta como `IDLE`; `record` y `recording`, como
+  una actualización real recibida por evento antes del ACK.
+- `app_status=idle` o `vf` (viewfinder) se interpreta como `IDLE`; `record` y `recording`, como
   `RECORDING`. Otro valor o una configuración sin `app_status` produce `UNKNOWN`.
   Un evento `app_status` actualiza el mismo estado. `rec_mode` y `system_mode`
   siguen visibles en el diagnóstico, pero no prueban actividad de grabación.
+- Los eventos físicamente observados `start_video_record` y `vf_start` actualizan
+  a `RECORDING` e `IDLE`, respectivamente. `vf_stop` no significa que empiece
+  una grabación y no se usa como prueba de ello.
+- Una revisión local del estado protege los eventos que llegan durante una
+  consulta: su respuesta no puede sobrescribir el estado más reciente. La
+  consulta automática tras una acción protege también eventos anteriores al
+  ACK. Una nueva consulta manual puede reconciliar el estado normalmente.
+- «Último evento de grabación» conserva el evento de vídeo aunque después
+  llegue un evento de batería. No implica almacenamiento persistente.
 - Iniciar requiere `IDLE`; detener admite `RECORDING` o `UNKNOWN`, este último
   como recuperación explícita. En `UNKNOWN` se puede consultar configuración.
 - `lastPhotoEvent` refleja exclusivamente `start_photo_capture`,
@@ -63,6 +72,10 @@ La interpretación de los estados `record`/`recording` se apoya en el
 que reconoce `record` en `app_status`. Se usan coincidencias exactas, sin
 considerar valores desconocidos como inactividad. Esa referencia no sustituye
 la comprobación física del estado en este firmware.
+`vf` aparece también en
+las [capturas de protocolo publicadas](https://gist.github.com/pbaja/f57e6cff7fa14601f6b256926aa33437).
+Su mapeo de configuración se cubre por tests; las capturas locales aportadas
+confirman el evento `vf_start`, pero no muestran `app_status` tras detener.
 
 Si el teléfono enruta la conexión por datos móviles, desactívalos durante la
 prueba. La app no selecciona redes ni conecta automáticamente al Wi-Fi.
@@ -143,14 +156,19 @@ físicamente, incluida rotación, reconexión y desconexión física.
 | Validado físicamente, comunicado por el usuario                      | Protocolo de petición y aceptación de `769`, `513` y `514` para la cámara de referencia.                                                                                                                                                        |
 | Cubierto por tests locales                                           | Envío de las tres acciones, token dinámico y nuevo token al reconectar, reserva inmediata, una petición en vuelo, ACK, rechazo sin cierre, eventos intercalados, ruta de foto, actualización de estado y timeout. Incluye regresión del Hito 1. |
 | Documentado por el usuario; sin captura física aportada en este hito | Eventos de foto `start_photo_capture`, `precise_capture_data_ready`, `photo_taken`. Se procesan si llegan; no se exige que lleguen todos ni en un orden fijo.                                                                                   |
-| Referencia externa y tests; pendiente de observar en esta cámara     | `app_status=record/recording` y eventos con `type=app_status`. No se inventan otros nombres de eventos de vídeo.                                                                                                                                |
+| Observado en capturas del usuario (06/09/2026)                       | `start_video_record` al iniciar, `app_status=record` durante la grabación y `vf_start` después de detener; eventos de batería posteriores.                                                                                                      |
+| Referencia externa y tests; pendiente de observar en esta cámara     | `app_status=recording/vf` y eventos con `type=app_status`.                                                                                                                                                                                      |
 
-No se ha realizado una nueva prueba física de la UI del Hito 2 durante su
-implementación. Para validarla: conectar; hacer una foto y comprobar la ruta;
-iniciar vídeo y observar la configuración recibida; detener y comprobar el
-retorno a `idle`; repetir después de rotar y reconectar. Conservar los mensajes
-reales para confirmar los estados/eventos de vídeo. Las rutas usadas por los
-tests son ejemplos sintéticos, no archivos observados en la SD.
+El usuario ha probado físicamente foto (ruta mostrada bajo `/tmp/fuse_d/DCIM/`),
+inicio y parada de vídeo (actividad confirmada mediante los LED). Las capturas
+revelaron que el diagnóstico ignoraba los eventos de vídeo y se quedaba con
+la configuración anterior. Se ha corregido el procesamiento de esos eventos y
+añadido regresión TCP para eventos anteriores al ACK, intercalados durante la
+consulta y posteriores a la respuesta, tanto en inicio como en parada.
+Falta repetir la prueba física con esta corrección: un solo inicio debe mostrar
+«Grabando» y deshabilitar iniciar; detener debe mostrar «Inactiva» al llegar
+`vf_start`; batería y consultas posteriores deben mantener el diagnóstico coherente.
+Las rutas completas usadas por los tests son ejemplos sintéticos.
 
 Limitaciones: no hay temporizador de finalización de foto ni polling periódico;
 si no llega `photo_taken` no se inventa una ruta. Un estado no reconocido mantiene

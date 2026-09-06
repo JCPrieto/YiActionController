@@ -101,6 +101,7 @@ private fun Diagnostics(
                     )
                     DiagnosticField("Última foto", state.lastPhotoPath)
                     DiagnosticField("Último evento de foto", state.lastPhotoEvent?.name)
+                    DiagnosticField("Último evento de grabación", state.lastRecordingEvent)
                     DiagnosticField("Token", state.token?.toString())
                     DiagnosticField("Batería", state.battery?.let { "$it %" })
                     DiagnosticField("Firmware", state.firmware)

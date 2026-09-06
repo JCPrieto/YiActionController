@@ -4,6 +4,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CameraActionStateTest {
+    @Test
+    fun observedVideoEventsDriveStateAndSurviveBatteryEvents() {
+        val started = CameraState().receive("""{"msg_id":7,"type":"start_video_record"}""")
+        assertEquals(RecordingState.RECORDING, started.recording)
+        assertEquals(
+            RecordingState.RECORDING,
+            started.receive("""{"msg_id":7,"type":"vf_stop"}""").recording
+        )
+        val stopped = started.receive("""{"msg_id":7,"type":"vf_start"}""")
+        assertEquals(RecordingState.IDLE, stopped.recording)
+        val battery = stopped.receive("""{"msg_id":7,"type":"battery","param":"42"}""")
+        assertEquals(RecordingState.IDLE, battery.recording)
+        assertEquals(stopped.lastRecordingEvent, battery.lastRecordingEvent)
+        assertEquals(
+            RecordingState.IDLE,
+            battery.receive("""{"msg_id":3,"rval":0,"param":[{"app_status":"vf"}]}""").recording
+        )
+        assertEquals(
+            RecordingState.UNKNOWN,
+            battery.receive("""{"msg_id":3,"rval":0,"param":[{"app_status":"unrecognised"}]}""").recording
+        )
+    }
+
     private fun CameraState.receive(raw: String) = applyMessage(cameraJson.decodeFromString(raw), raw)
 
     @Test

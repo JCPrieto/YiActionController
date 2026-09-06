@@ -10,6 +10,47 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 
 class CameraActionsTest {
+    @Test
+    fun videoEventsWinOverStaleActionSnapshotsInEveryArrivalOrder() {
+        for (start in listOf(true, false)) {
+            for (eventOrder in 0..2) {
+                ServerSocket(0).use { server ->
+                    CameraClient("127.0.0.1", server.localPort).use { client ->
+                        client.connect()
+                        server.accept().use { peer ->
+                            peer.authenticate(client, 7, if (start) "idle" else "record")
+                            if (start) client.startRecording() else client.stopRecording()
+                            val id = if (start) CameraCommand.START_RECORDING else CameraCommand.STOP_RECORDING
+                            assertEquals(id, peer.request().messageId)
+                            val event = if (start) "start_video_record" else "vf_start"
+                            val raw = """{"msg_id":7,"type":"$event"}"""
+                            val expected = if (start) RecordingState.RECORDING else RecordingState.IDLE
+                            if (eventOrder == 0) {
+                                peer.send(raw) // Event before ACK.
+                                assertNotNull(client.awaitState { it.recording == expected }.pendingAction)
+                            }
+                            peer.reply(id)
+                            assertEquals(CameraCommand.GET_CONFIG, peer.request().messageId)
+                            if (eventOrder == 1) peer.send(raw) // Event while configuration is in flight.
+                            peer.config(if (start) "idle" else "record") // Snapshot predates transition.
+                            if (eventOrder == 2) peer.send(raw) // Screenshot sequence: snapshot then event.
+                            val confirmed = client.awaitState { it.pending.isEmpty() && it.recording == expected }
+                            assertNull(confirmed.pendingAction)
+                            assertEquals(raw, confirmed.lastRecordingEvent)
+                            // A new explicit query after the event can still reconcile actual state.
+                            client.refresh()
+                            assertEquals(CameraCommand.GET_BATTERY, peer.request().messageId)
+                            peer.send("""{"msg_id":13,"rval":0,"type":"battery","param":"42"}""")
+                            assertEquals(CameraCommand.GET_CONFIG, peer.request().messageId)
+                            peer.config(if (start) "record" else "vf")
+                            assertEquals(expected, client.awaitState { it.canSendCommand }.recording)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun Socket.request(): CameraRequest {
         val framer = JsonObjectFramer()
         while (true) {

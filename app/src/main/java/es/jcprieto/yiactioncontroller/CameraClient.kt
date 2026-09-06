@@ -103,6 +103,9 @@ class CameraClient(
             val pending = mutableMapOf<Int, Long>()
             val queue = ArrayDeque<Int>()
             var token: Int? = null
+            var actionRecordingRevision = 0L
+            var configRecordingRevision = 0L
+            var actionConfigRevision: Long? = null
 
             fun publishPending() = update(current) {
                 it.copy(pending = pending.keys + queue + current.reservedCommands)
@@ -112,7 +115,17 @@ class CameraClient(
                 check(pending.isEmpty()) { "Solo se permite una petición en vuelo" }
                 val request = CameraRequest(id, if (id == LOGIN) 0 else checkNotNull(token))
                 val raw = cameraJson.encodeToString(request)
-                update(current) { it.copy(lastRequest = raw) }
+                update(current) {
+                    if (id == CameraCommand.START_RECORDING || id == CameraCommand.STOP_RECORDING) {
+                        actionRecordingRevision = it.recordingRevision
+                    }
+                    if (id == GET_CONFIG) {
+                        // The automatic snapshot may lag behind an event even before the ACK.
+                        configRecordingRevision = actionConfigRevision ?: it.recordingRevision
+                        actionConfigRevision = null
+                    }
+                    it.copy(lastRequest = raw)
+                }
                 output.write(raw.toByteArray(Charsets.UTF_8))
                 output.flush()
                 pending[id] = System.nanoTime()
@@ -173,6 +186,11 @@ class CameraClient(
                     }
                     update(current) {
                         var next = it.applyMessage(message, raw)
+                        if (message.messageId == GET_CONFIG && completesRequest &&
+                            it.recordingRevision != configRecordingRevision
+                        ) {
+                            next = next.copy(recording = it.recording)
+                        }
                         if (completesRequest && it.pendingAction?.commandId == message.messageId) {
                             if (it.pendingAction != CameraAction.TAKE_PHOTO) {
                                 // ACK (including rejection) is not a report of actual recording state.
@@ -180,6 +198,7 @@ class CameraClient(
                                 if (next.recording == RecordingState.STARTING || next.recording == RecordingState.STOPPING) {
                                     next = next.copy(recording = RecordingState.UNKNOWN)
                                 }
+                                actionConfigRevision = actionRecordingRevision
                                 queue.addLast(GET_CONFIG)
                             }
                             next = next.copy(pendingAction = null)
