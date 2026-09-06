@@ -1,9 +1,12 @@
 plugins {
+    alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.android.application)
 }
 
 android {
     namespace = "es.jcprieto.yiactioncontroller"
+    buildFeatures { compose = true }
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -33,6 +36,13 @@ android {
 }
 
 dependencies {
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.material3)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
