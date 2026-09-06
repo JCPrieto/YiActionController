@@ -1,5 +1,8 @@
 package es.jcprieto.yiactioncontroller
 
+import es.jcprieto.yiactioncontroller.CameraCommand.EVENT
+import es.jcprieto.yiactioncontroller.CameraCommand.GET_BATTERY
+import es.jcprieto.yiactioncontroller.CameraCommand.GET_CONFIG
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
@@ -27,11 +30,25 @@ data class CameraState(
     val configuration: Map<String, String> = emptyMap(),
     val events: Map<String, String> = emptyMap(),
     val pending: Set<Int> = emptySet(),
+    val pendingAction: CameraAction? = null,
+    val recording: RecordingState = RecordingState.UNKNOWN,
+    val lastPhotoPath: String? = null,
+    val lastPhotoEvent: PhotoEvent? = null,
     val lastRequest: String? = null,
     val lastMessage: String? = null,
     val lastEvent: String? = null,
     val error: String? = null,
 ) {
+    val canSendCommand: Boolean
+        get() = connection == ConnectionStatus.CONNECTED &&
+                token != null && token > 0 && pending.isEmpty() && pendingAction == null
+    val canTakePhoto: Boolean get() = canSendCommand
+    val canStartRecording: Boolean get() = canSendCommand && recording == RecordingState.IDLE
+
+    // Stopping is an explicit recovery option when actual state cannot be established.
+    val canStopRecording: Boolean
+        get() = canSendCommand &&
+                recording in setOf(RecordingState.RECORDING, RecordingState.UNKNOWN)
     // Primary keys verified on YDXJv25L_1.5.12; retain aliases for diagnostics.
     private fun field(vararg keys: String): String? =
         keys.firstNotNullOfOrNull { events[it] } ?: keys.firstNotNullOfOrNull { configuration[it] }
@@ -48,13 +65,13 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
     if (message.rval != null && message.rval != 0) {
         return next.copy(error = "Comando ${message.messageId}: rval=${message.rval}")
     }
-    if ((message.messageId == 13 && message.rval == 0 || message.messageId == 7) &&
+    if ((message.messageId == GET_BATTERY && message.rval == 0 || message.messageId == EVENT) &&
         message.type == "battery"
     ) {
         val value = message.param.text()?.toIntOrNull()?.takeIf { it in 0..100 }
         next = next.copy(battery = value, error = if (value == null) "Batería no válida" else next.error)
     }
-    if (message.messageId == 3 && message.rval == 0) {
+    if (message.messageId == GET_CONFIG && message.rval == 0) {
         val values = message.param as? JsonArray
             ?: error("La configuración no contiene un array en param")
         val configuration = buildMap {
@@ -69,15 +86,39 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
                 }
             }
         }
-        next = next.copy(configuration = configuration, events = next.events - configuration.keys)
+        next = next.copy(
+            configuration = configuration,
+            events = next.events - configuration.keys,
+            recording = recordingFromAppStatus(configuration["app_status"]),
+        )
     }
-    if (message.messageId == 7) {
+    if (message.messageId == EVENT) {
         val eventValue = message.param.text() ?: message.param?.toString()
         next = next.copy(
             lastEvent = raw,
             events = if (message.type != null && eventValue != null)
                 next.events + (message.type to eventValue) else next.events,
         )
+        next = when (message.type) {
+            "app_status" -> next.copy(recording = recordingFromAppStatus(message.param.text()))
+            "start_photo_capture" -> next.copy(lastPhotoEvent = PhotoEvent.START_PHOTO_CAPTURE)
+            "precise_capture_data_ready" -> next.copy(lastPhotoEvent = PhotoEvent.PRECISE_CAPTURE_DATA_READY)
+            "photo_taken" -> next.copy(
+                lastPhotoEvent = PhotoEvent.PHOTO_TAKEN,
+                lastPhotoPath = (message.param as? JsonPrimitive)
+                    ?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() } ?: next.lastPhotoPath,
+            )
+
+            else -> next
+        }
     }
     return next
+}
+
+// Exact app_status values used by the original-YI reference client linked in README.
+// Mode fields and unrelated events must not imply a recording state.
+private fun recordingFromAppStatus(value: String?): RecordingState = when (value) {
+    "idle" -> RecordingState.IDLE
+    "record", "recording" -> RecordingState.RECORDING
+    else -> RecordingState.UNKNOWN
 }

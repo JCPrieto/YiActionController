@@ -28,7 +28,10 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 val model: CameraViewModel = viewModel()
                 val state by model.state.collectAsStateWithLifecycle()
-                Diagnostics(state, model::connect, model::disconnect, model::refresh)
+                Diagnostics(
+                    state, model::connect, model::disconnect, model::refresh,
+                    model::takePhoto, model::startRecording, model::stopRecording
+                )
             }
         }
     }
@@ -40,6 +43,9 @@ private fun Diagnostics(
     connect: () -> Unit,
     disconnect: () -> Unit,
     refresh: () -> Unit,
+    takePhoto: () -> Unit,
+    startRecording: () -> Unit,
+    stopRecording: () -> Unit,
 ) {
     Scaffold { padding ->
         Column(
@@ -63,11 +69,38 @@ private fun Diagnostics(
             }
             Button(
                 onClick = refresh,
-                enabled = state.connection == ConnectionStatus.CONNECTED && state.pending.isEmpty(),
+                enabled = state.canSendCommand,
             ) { Text(if (state.pending.isEmpty()) "Consultar batería y configuración" else "Consultando…") }
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            HorizontalDivider()
+            Text("Control", style = MaterialTheme.typography.titleLarge)
+            Button(onClick = takePhoto, enabled = state.canTakePhoto) { Text("Hacer foto") }
+            Button(onClick = startRecording, enabled = state.canStartRecording) { Text("Iniciar grabación") }
+            OutlinedButton(onClick = stopRecording, enabled = state.canStopRecording) { Text("Detener grabación") }
+            if (state.recording == RecordingState.UNKNOWN) {
+                Text("Consulta la configuración para conocer el estado. Detener está disponible como recuperación.")
+            }
             SelectionContainer {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DiagnosticField(
+                        "Estado de grabación", when (state.recording) {
+                            RecordingState.UNKNOWN -> "Desconocido"
+                            RecordingState.IDLE -> "Inactiva"
+                            RecordingState.STARTING -> "Solicitando inicio…"
+                            RecordingState.RECORDING -> "Grabando"
+                            RecordingState.STOPPING -> "Solicitando detención…"
+                        }
+                    )
+                    DiagnosticField(
+                        "Acción pendiente", when (state.pendingAction) {
+                            CameraAction.TAKE_PHOTO -> "Hacer foto"
+                            CameraAction.START_RECORDING -> "Iniciar grabación"
+                            CameraAction.STOP_RECORDING -> "Detener grabación"
+                            null -> "Ninguna"
+                        }
+                    )
+                    DiagnosticField("Última foto", state.lastPhotoPath)
+                    DiagnosticField("Último evento de foto", state.lastPhotoEvent?.name)
                     DiagnosticField("Token", state.token?.toString())
                     DiagnosticField("Batería", state.battery?.let { "$it %" })
                     DiagnosticField("Firmware", state.firmware)

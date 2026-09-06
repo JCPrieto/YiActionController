@@ -1,5 +1,9 @@
 package es.jcprieto.yiactioncontroller
 
+import es.jcprieto.yiactioncontroller.CameraCommand.EVENT
+import es.jcprieto.yiactioncontroller.CameraCommand.GET_BATTERY
+import es.jcprieto.yiactioncontroller.CameraCommand.GET_CONFIG
+import es.jcprieto.yiactioncontroller.CameraCommand.LOGIN
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,7 +22,10 @@ class CameraClient(
 ) : AutoCloseable {
     private class Session {
         val socket = Socket()
-        val commands = Channel<Int>(Channel.CONFLATED)
+        val commands = Channel<List<Int>>(1)
+
+        // Guarded by lock; reserve immediately so rapid taps cannot queue multiple actions.
+        var reservedCommands: Set<Int> = emptySet()
         var job: Job? = null
     }
 
@@ -36,11 +43,32 @@ class CameraClient(
         current.job = scope.launch { runSession(current) }
     }
 
-    fun refresh() = synchronized(lock) {
-        if (mutableState.value.connection == ConnectionStatus.CONNECTED) {
-            session?.commands?.trySend(0)
+    fun refresh() = submit(listOf(GET_BATTERY, GET_CONFIG))
+    fun takePhoto() = submit(listOf(CameraCommand.TAKE_PHOTO), CameraAction.TAKE_PHOTO)
+    fun startRecording() = submit(listOf(CameraCommand.START_RECORDING), CameraAction.START_RECORDING)
+    fun stopRecording() = submit(listOf(CameraCommand.STOP_RECORDING), CameraAction.STOP_RECORDING)
+
+    private fun submit(commands: List<Int>, action: CameraAction? = null) = synchronized(lock) {
+        val current = session ?: return@synchronized
+        val previous = mutableState.value
+        val allowed = when (action) {
+            CameraAction.TAKE_PHOTO -> previous.canTakePhoto
+            CameraAction.START_RECORDING -> previous.canStartRecording
+            CameraAction.STOP_RECORDING -> previous.canStopRecording
+            null -> previous.canSendCommand
         }
-        Unit
+        if (!allowed || !current.commands.trySend(commands).isSuccess) return@synchronized
+        current.reservedCommands = commands.toSet()
+        mutableState.value = previous.copy(
+            pending = current.reservedCommands,
+            pendingAction = action,
+            error = null,
+            recording = when (action) {
+                CameraAction.START_RECORDING -> RecordingState.STARTING
+                CameraAction.STOP_RECORDING -> RecordingState.STOPPING
+                else -> previous.recording
+            },
+        )
     }
 
     fun disconnect() = synchronized(lock) {
@@ -77,12 +105,12 @@ class CameraClient(
             var token: Int? = null
 
             fun publishPending() = update(current) {
-                it.copy(pending = pending.keys + queue)
+                it.copy(pending = pending.keys + queue + current.reservedCommands)
             }
 
             fun send(id: Int) {
                 check(pending.isEmpty()) { "Solo se permite una petición en vuelo" }
-                val request = CameraRequest(id, if (id == 257) 0 else checkNotNull(token))
+                val request = CameraRequest(id, if (id == LOGIN) 0 else checkNotNull(token))
                 val raw = cameraJson.encodeToString(request)
                 update(current) { it.copy(lastRequest = raw) }
                 output.write(raw.toByteArray(Charsets.UTF_8))
@@ -93,17 +121,19 @@ class CameraClient(
 
             fun enqueueQueries() {
                 if (pending.isNotEmpty() || queue.isNotEmpty()) return
-                queue.addLast(13)
-                queue.addLast(3)
+                queue.addLast(GET_BATTERY)
+                queue.addLast(GET_CONFIG)
                 publishPending()
             }
 
             update(current) { it.copy(connection = ConnectionStatus.AUTHENTICATING) }
-            send(257)
+            send(LOGIN)
             while (currentCoroutineContext().isActive) {
-                if (current.commands.tryReceive().isSuccess && token != null) {
-                    update(current) { it.copy(error = null) }
-                    enqueueQueries()
+                synchronized(lock) {
+                    current.commands.tryReceive().getOrNull()?.let { commands ->
+                        queue.addAll(commands)
+                        current.reservedCommands = emptySet()
+                    }
                 }
                 if (pending.isEmpty() && queue.isNotEmpty()) send(queue.removeFirst())
                 val expired = pending.entries.firstOrNull {
@@ -127,20 +157,34 @@ class CameraClient(
                     ).toString()
                     update(current) { it.copy(lastMessage = raw) }
                     val message = cameraJson.decodeFromString<CameraMessage>(raw)
-                    if (message.messageId == 257 && 257 in pending) {
+                    val completesRequest = message.messageId != EVENT && message.rval != null &&
+                            message.messageId in pending
+                    if (message.messageId == LOGIN && LOGIN in pending) {
                         check(message.rval == 0) { "Inicio de sesión rechazado: rval=${message.rval}" }
                         token = message.param.text()?.toIntOrNull()?.takeIf { it > 0 }
                             ?: error("Token de sesión no válido")
-                        pending.remove(257)
+                        pending.remove(LOGIN)
                         update(current) {
                             it.copy(connection = ConnectionStatus.CONNECTED, token = token)
                         }
                         enqueueQueries()
-                    } else if (message.rval != null) {
+                    } else if (completesRequest) {
                         pending.remove(message.messageId)
                     }
                     update(current) {
-                        it.applyMessage(message, raw).copy(pending = pending.keys + queue)
+                        var next = it.applyMessage(message, raw)
+                        if (completesRequest && it.pendingAction?.commandId == message.messageId) {
+                            if (it.pendingAction != CameraAction.TAKE_PHOTO) {
+                                // ACK (including rejection) is not a report of actual recording state.
+                                // Preserve any real status event already received, then request fresh status.
+                                if (next.recording == RecordingState.STARTING || next.recording == RecordingState.STOPPING) {
+                                    next = next.copy(recording = RecordingState.UNKNOWN)
+                                }
+                                queue.addLast(GET_CONFIG)
+                            }
+                            next = next.copy(pendingAction = null)
+                        }
+                        next.copy(pending = pending.keys + queue + current.reservedCommands)
                     }
                 }
             }

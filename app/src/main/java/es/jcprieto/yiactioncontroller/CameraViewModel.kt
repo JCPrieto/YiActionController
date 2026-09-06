@@ -8,5 +8,8 @@ class CameraViewModel : ViewModel() {
     fun connect() = client.connect()
     fun disconnect() = client.disconnect()
     fun refresh() = client.refresh()
+    fun takePhoto() = client.takePhoto()
+    fun startRecording() = client.startRecording()
+    fun stopRecording() = client.stopRecording()
     override fun onCleared() = client.close()
 }
