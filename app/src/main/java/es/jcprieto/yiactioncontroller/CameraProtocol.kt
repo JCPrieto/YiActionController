@@ -27,11 +27,12 @@ data class CameraState(
     val configuration: Map<String, String> = emptyMap(),
     val events: Map<String, String> = emptyMap(),
     val pending: Set<Int> = emptySet(),
+    val lastRequest: String? = null,
     val lastMessage: String? = null,
     val lastEvent: String? = null,
     val error: String? = null,
 ) {
-    // These aliases are provisional until an actual msg_id=3 payload is captured.
+    // Primary keys verified on YDXJv25L_1.5.12; retain aliases for diagnostics.
     private fun field(vararg keys: String): String? =
         keys.firstNotNullOfOrNull { events[it] } ?: keys.firstNotNullOfOrNull { configuration[it] }
 
@@ -39,7 +40,7 @@ data class CameraState(
     val hardware: String? get() = field("hw_version", "hardware_version")
     val sdCard: String? get() = field("sd_card_status", "sd_status")
     val videoResolution: String? get() = field("video_resolution")
-    val cameraStatus: String? get() = field("camera_status", "status")
+    val cameraStatus: String? get() = field("app_status", "camera_status", "status")
 }
 
 internal fun CameraState.applyMessage(message: CameraMessage, raw: String): CameraState {

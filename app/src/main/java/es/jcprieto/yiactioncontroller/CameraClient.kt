@@ -73,15 +73,29 @@ class CameraClient(
             val framer = JsonObjectFramer()
             val bytes = ByteArray(4096)
             val pending = mutableMapOf<Int, Long>()
+            val queue = ArrayDeque<Int>()
             var token: Int? = null
 
+            fun publishPending() = update(current) {
+                it.copy(pending = pending.keys + queue)
+            }
+
             fun send(id: Int) {
-                if (id in pending) return
+                check(pending.isEmpty()) { "Solo se permite una petición en vuelo" }
                 val request = CameraRequest(id, if (id == 257) 0 else checkNotNull(token))
-                output.write(cameraJson.encodeToString(request).toByteArray(Charsets.UTF_8))
+                val raw = cameraJson.encodeToString(request)
+                update(current) { it.copy(lastRequest = raw) }
+                output.write(raw.toByteArray(Charsets.UTF_8))
                 output.flush()
                 pending[id] = System.nanoTime()
-                update(current) { it.copy(pending = pending.keys.toSet()) }
+                publishPending()
+            }
+
+            fun enqueueQueries() {
+                if (pending.isNotEmpty() || queue.isNotEmpty()) return
+                queue.addLast(13)
+                queue.addLast(3)
+                publishPending()
             }
 
             update(current) { it.copy(connection = ConnectionStatus.AUTHENTICATING) }
@@ -89,9 +103,9 @@ class CameraClient(
             while (currentCoroutineContext().isActive) {
                 if (current.commands.tryReceive().isSuccess && token != null) {
                     update(current) { it.copy(error = null) }
-                    send(13)
-                    send(3)
+                    enqueueQueries()
                 }
+                if (pending.isEmpty() && queue.isNotEmpty()) send(queue.removeFirst())
                 val expired = pending.entries.firstOrNull {
                     (System.nanoTime() - it.value) / 1_000_000 >= responseTimeoutMillis
                 }
@@ -111,6 +125,7 @@ class CameraClient(
                     val raw = Charsets.UTF_8.newDecoder().decode(
                         ByteBuffer.wrap(frame.toByteArray(Charsets.ISO_8859_1)),
                     ).toString()
+                    update(current) { it.copy(lastMessage = raw) }
                     val message = cameraJson.decodeFromString<CameraMessage>(raw)
                     if (message.messageId == 257 && 257 in pending) {
                         check(message.rval == 0) { "Inicio de sesión rechazado: rval=${message.rval}" }
@@ -120,13 +135,12 @@ class CameraClient(
                         update(current) {
                             it.copy(connection = ConnectionStatus.CONNECTED, token = token)
                         }
-                        send(13)
-                        send(3)
+                        enqueueQueries()
                     } else if (message.rval != null) {
                         pending.remove(message.messageId)
                     }
                     update(current) {
-                        it.applyMessage(message, raw).copy(pending = pending.keys.toSet())
+                        it.applyMessage(message, raw).copy(pending = pending.keys + queue)
                     }
                 }
             }
@@ -140,7 +154,13 @@ class CameraClient(
             synchronized(lock) {
                 if (session === current) {
                     session = null
-                    mutableState.value = CameraState(error = failure)
+                    val previous = mutableState.value
+                    mutableState.value = CameraState(
+                        error = failure,
+                        lastRequest = previous.lastRequest,
+                        lastMessage = previous.lastMessage,
+                        lastEvent = previous.lastEvent,
+                    )
                 }
             }
         }

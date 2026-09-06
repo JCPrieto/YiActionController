@@ -37,27 +37,43 @@ Conexión y respuestas tienen un plazo de 5 segundos. El timeout de lectura de
 no hay comandos pendientes. EOF, JSON inválido, respuesta ausente y fallo de
 autenticación cierran la sesión. No hay reconexión automática. Un `rval` distinto
 de cero en las consultas se muestra como error sin aplicar el contenido.
+Las consultas se envían de una en una: primero batería, y solo al recibir su
+respuesta se envía configuración. Los eventos no liberan la petición pendiente.
+Al fallar se conservan la última petición y el último mensaje/evento para
+diagnóstico, aunque se borran el token y los valores de la sesión. El plazo
+de respuesta sigue siendo de 5 segundos; no se oculta una respuesta ausente.
 
 El token se obtiene de `param` del inicio de sesión y nunca se fija a `4`.
 Los eventos `msg_id=7` no consumen las respuestas pendientes de las consultas.
 La batería acepta el porcentaje textual o numérico y valida el rango 0–100.
 
-La respuesta real de configuración todavía no se ha aportado. Se aceptan objetos
+La configuración se ha consultado físicamente desde el teléfono por USB/ADB.
+Se aceptan objetos
 `{"sw_version":"..."}` y `{"key":"sw_version","value":"..."}` dentro de
-`param`. Los alias provisionales de la UI son:
+`param`. La primera clave de cada campo está verificada en este firmware;
+las demás se conservan como alias:
 
-| Campo            | Claves                           |
-|------------------|----------------------------------|
-| Firmware         | `sw_version`, `firmware_version` |
-| Hardware         | `hw_version`, `hardware_version` |
-| SD               | `sd_card_status`, `sd_status`    |
-| Vídeo            | `video_resolution`               |
-| Estado de cámara | `camera_status`, `status`        |
+| Campo            | Claves                                  |
+|------------------|-----------------------------------------|
+| Firmware         | `sw_version`, `firmware_version`        |
+| Hardware         | `hw_version`, `hardware_version`        |
+| SD               | `sd_card_status`, `sd_status`           |
+| Vídeo            | `video_resolution`                      |
+| Estado de cámara | `app_status`, `camera_status`, `status` |
 
 Se muestran los valores originales, sin inferir que la cámara está inactiva o
 que tiene SD por el hecho de estar conectada. Un campo ausente dice **Sin datos**.
 Los eventos con esas claves actualizan los campos; los demás se conservan como
-diagnóstico. Hay que contrastar estos alias con el `msg_id=3` real del dispositivo.
+diagnóstico.
+
+### Fallo de batería verificado en el dispositivo
+
+En la prueba física del 6 de septiembre de 2026, enviar los JSON de `13` y `3`
+concatenados produjo únicamente la respuesta de configuración; no llegó la
+respuesta de batería durante el plazo de 5 segundos. Enviados secuencialmente,
+esperando la respuesta entre ambos, los dos comandos respondieron. Por eso el
+cliente mantiene una sola petición en vuelo. El soporte de JSON concatenados
+en recepción no implica que la cámara los acepte como peticiones.
 
 ## Verificación
 
@@ -66,9 +82,10 @@ diagnóstico. Hay que contrastar estos alias con el `msg_id=3` real del disposit
 ```
 
 Pruebas JVM del encuadre JSON, mapeo de mensajes y servidor TCP local: tokens
-dinámicos, reconexión, respuestas concatenadas y fuera de orden, eventos,
-UTF-8 fragmentado, errores, EOF y cancelación. La validación física pendiente
-consiste en comprobar los ocho campos, bajar la batería y observar su evento,
+dinámicos, reconexión, peticiones secuenciales, respuestas concatenadas, eventos,
+UTF-8 fragmentado, errores, EOF y cancelación. Se verificaron físicamente el
+inicio de sesión, el evento y la consulta de batería y la consulta de configuración
+desde el teléfono. Falta comprobar visualmente la app actualizada, bajar la batería,
 rotar la pantalla, desconectar/reconectar y apagar la cámara durante la sesión.
 
 La configuración de Compose usa

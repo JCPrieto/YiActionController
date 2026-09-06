@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CameraProtocolTest {
+    @Test
+    fun mapsVerifiedCameraStatusKey() {
+        val state = CameraState().receive("""{"rval":0,"msg_id":3,"param":[{"app_status":"idle"}]}""")
+        assertEquals("idle", state.cameraStatus)
+        val changed = state.receive("""{"msg_id":7,"type":"app_status","param":"busy"}""")
+        assertEquals("busy", changed.cameraStatus)
+    }
+
     private fun CameraState.receive(raw: String) = applyMessage(cameraJson.decodeFromString(raw), raw)
 
     @Test

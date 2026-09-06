@@ -7,6 +7,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
@@ -42,15 +43,20 @@ class CameraClientTest {
                         assertEquals(CameraRequest(257, 0), peer.request())
                         peer.send("""{"rval":0,"msg_id":257,"param":$token}""")
                         assertEquals(CameraRequest(13, token), peer.request())
+                        peer.soTimeout = 300
+                        assertThrows(SocketTimeoutException::class.java) { peer.getInputStream().read() }
+                        peer.soTimeout = 3_000
+                        // Complete the battery query before the next command may be sent.
+                        peer.send("""{"rval":0,"msg_id":13,"type":"battery","param":"93"}{"msg_id":7,"type":"battery","param":"92"}""")
                         assertEquals(CameraRequest(3, token), peer.request())
-                        // Configuration arrives before battery, followed immediately by an event.
-                        peer.send("""{"rval":0,"msg_id":3,"param":[{"sw_version":"test"}]}{"rval":0,"msg_id":13,"type":"battery","param":"93"}{"msg_id":7,"type":"battery","param":"92"}""")
+                        peer.send("""{"rval":0,"msg_id":3,"param":[{"sw_version":"test"}]}""")
                         val state = client.awaitState { it.battery == 92 && it.pending.isEmpty() }
                         assertEquals(token, state.token)
                         assertEquals("test", state.firmware)
                         assertEquals(ConnectionStatus.CONNECTED, state.connection)
                         client.refresh()
                         assertEquals(CameraRequest(13, token), peer.request())
+                        peer.send("""{"rval":0,"msg_id":13,"type":"battery","param":"92"}""")
                         assertEquals(CameraRequest(3, token), peer.request())
                         client.disconnect()
                         assertEquals(-1, peer.getInputStream().read())
@@ -71,6 +77,7 @@ class CameraClientTest {
                     peer.request()
                     peer.send("""{"rval":0,"msg_id":257,"param":11}""")
                     peer.request()
+                    peer.send("""{"rval":0,"msg_id":13,"type":"battery","param":"93"}""")
                     peer.request()
                     val raw = """{"rval":0,"msg_id":3,"param":[{"sw_version":"versión"}]}""".toByteArray()
                     val split = raw.indexOf(0xc3.toByte()) + 1
@@ -92,7 +99,6 @@ class CameraClientTest {
                     peer.soTimeout = 3_000
                     peer.request()
                     peer.send("""{"rval":0,"msg_id":257,"param":4}""")
-                    peer.request()
                     peer.request()
                 }
                 val state = client.awaitState { it.error != null }
@@ -151,11 +157,17 @@ class CameraClientTest {
                     peer.request()
                     peer.send("""{"rval":0,"msg_id":257,"param":4}""")
                     peer.request()
-                    peer.request()
-                    peer.send("""{"rval":0,"msg_id":3,"param":[]}{"msg_id":7,"type":"battery","param":"92"}""")
+                    peer.send("""{"msg_id":7,"type":"battery","param":"92"}""")
                     assertTrue(13 in client.awaitState { it.battery == 92 }.pending)
                     val expired = client.awaitState { it.error != null }
                     assertTrue(expired.error!!.contains("comando 13"))
+                    assertEquals(
+                        CameraRequest(13, 4),
+                        cameraJson.decodeFromString<CameraRequest>(expired.lastRequest!!)
+                    )
+                    assertEquals("""{"msg_id":7,"type":"battery","param":"92"}""", expired.lastMessage)
+                    // No configuration request was sent after an event or after the timeout.
+                    assertEquals(-1, peer.getInputStream().read())
                 }
             }
         }

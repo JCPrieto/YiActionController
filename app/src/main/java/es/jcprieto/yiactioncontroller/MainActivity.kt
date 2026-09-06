@@ -81,6 +81,7 @@ private fun Diagnostics(
                     state.configuration.toSortedMap().forEach { (key, value) -> DiagnosticField(key, value) }
                     HorizontalDivider()
                     DiagnosticField("Último evento asíncrono", state.lastEvent)
+                    DiagnosticField("Última petición", state.lastRequest)
                     DiagnosticField("Último mensaje", state.lastMessage)
                 }
             }
