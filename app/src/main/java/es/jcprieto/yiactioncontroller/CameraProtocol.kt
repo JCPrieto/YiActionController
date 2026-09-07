@@ -31,6 +31,8 @@ data class CameraState(
     val events: Map<String, String> = emptyMap(),
     val pending: Set<Int> = emptySet(),
     val pendingAction: CameraAction? = null,
+    val previewControlRequested: Boolean = false,
+    internal val recordingStopRequested: Boolean = false,
     val recording: RecordingState = RecordingState.UNKNOWN,
     val lastRecordingEvent: String? = null,
     internal val recordingRevision: Long = 0,
@@ -104,8 +106,10 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
         next = when (message.type) {
             "app_status" -> next.withRecordingEvent(recordingFromAppStatus(message.param.text()), raw)
             "start_video_record" -> next.withRecordingEvent(RecordingState.RECORDING, raw)
+                .copy(recordingStopRequested = false)
             // Observed after stopping on the reference firmware (return to viewfinder).
-            "vf_start" -> next.withRecordingEvent(RecordingState.IDLE, raw)
+            "vf_start" -> if (previewControlRequested && recording == RecordingState.RECORDING && !recordingStopRequested)
+                next else next.withRecordingEvent(RecordingState.IDLE, raw).copy(recordingStopRequested = false)
             "start_photo_capture" -> next.copy(lastPhotoEvent = PhotoEvent.START_PHOTO_CAPTURE)
             "precise_capture_data_ready" -> next.copy(lastPhotoEvent = PhotoEvent.PRECISE_CAPTURE_DATA_READY)
             "photo_taken" -> next.copy(

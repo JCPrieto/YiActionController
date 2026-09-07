@@ -1,4 +1,4 @@
-# YI Action Controller · Hito 2: control y diagnóstico
+# YI Action Controller · Hito 3: vista previa RTSP
 
 Android nativo, Kotlin y Jetpack Compose. Hito limitado al socket TCP de la
 Xiaomi YI original YDXJ01XY. Referencia física aportada: hardware `YDXJ_v23L`,
@@ -77,8 +77,9 @@ las [capturas de protocolo publicadas](https://gist.github.com/pbaja/f57e6cff7fa
 Su mapeo de configuración se cubre por tests; las capturas locales aportadas
 confirman el evento `vf_start`, pero no muestran `app_status` tras detener.
 
-Si el teléfono enruta la conexión por datos móviles, desactívalos durante la
-prueba. La app no selecciona redes ni conecta automáticamente al Wi-Fi.
+Los datos móviles pueden permanecer activos: si se identifica una Wi-Fi con
+ruta específica hacia la YI, la app liga los sockets de control y de RTSP a esa
+Network. No conecta automáticamente al Wi-Fi ni modifica la red predeterminada.
 
 ## Estructura y protocolo
 
@@ -165,9 +166,8 @@ revelaron que el diagnóstico ignoraba los eventos de vídeo y se quedaba con
 la configuración anterior. Se ha corregido el procesamiento de esos eventos y
 añadido regresión TCP para eventos anteriores al ACK, intercalados durante la
 consulta y posteriores a la respuesta, tanto en inicio como en parada.
-Falta repetir la prueba física con esta corrección: un solo inicio debe mostrar
-«Grabando» y deshabilitar iniciar; detener debe mostrar «Inactiva» al llegar
-`vf_start`; batería y consultas posteriores deben mantener el diagnóstico coherente.
+El usuario ha confirmado posteriormente esta corrección como validada físicamente:
+inicio/parada, eventos de vídeo y diagnóstico forman parte del Hito 2 completado.
 Las rutas completas usadas por los tests son ejemplos sintéticos.
 
 Limitaciones: no hay temporizador de finalización de foto ni polling periódico;
@@ -180,6 +180,130 @@ La configuración de Compose usa
 su [plugin oficial de compilación](https://developer.android.com/develop/ui/compose/setup-compose-dependencies-and-compiler),
 alineado con Kotlin 2.2.10 incluido por el AGP del proyecto.
 
-No incluye RTSP, vista previa, Media3, galería, listado/descarga de archivos,
-cambios de configuración, conexión automática al Wi-Fi, persistencia, base de
-datos ni DI. No incorpora funcionalidades del Hito 3.
+## Hito 3 · Vista previa RTSP
+
+El usuario ha confirmado los Hitos 1 y 2 completos y validados físicamente,
+incluida la corrección de los estados de grabación descrita anteriormente.
+La vista previa de este hito está implementada, pero **pendiente de prueba
+física RTSP**. Los tests JVM no reproducen ni simulan un servidor RTSP real.
+
+Se usan exclusivamente `media3-exoplayer`, `media3-exoplayer-rtsp` y `media3-ui`
+de AndroidX Media3 **1.11.0**, declarados en el version catalog.
+
+| Canal             | Destino                    | Función                                              |
+|-------------------|----------------------------|------------------------------------------------------|
+| Control existente | TCP `192.168.42.1:7878`    | Token, diagnóstico, foto/vídeo y comandos de preview |
+| Vídeo             | `rtsp://192.168.42.1/live` | Media3 con RTP intercalado sobre TCP                 |
+
+### Inicio y parada
+
+1. Conectar manualmente el teléfono al Wi-Fi de la YI y pulsar **Conectar**.
+2. Pulsar **Iniciar vista previa**. Se exige sesión TCP conectada y se confirma
+   una Network Wi-Fi con ruta a la cámara.
+3. Se envía `START_PREVIEW=259` con el token actual y se espera `rval=0`.
+   Un rechazo se muestra como error de control y no crea el reproductor.
+4. Solo entonces `Media3PreviewPlayer` crea ExoPlayer y un `RtspMediaSource`
+   explícito con la socket factory de esa Network, `setForceUseRtpTcp(true)`
+   y timeout de 8 segundos. No se habilita logging de protocolo.
+5. **Detener vista previa** libera localmente el reproductor primero y después
+   envía `STOP_PREVIEW=260`. Si había un inicio en vuelo, espera su respuesta
+   para detenerlo, sin llegar a crear el player si ya se solicitó la parada.
+
+Ambos comandos usan el lector y la cola TCP existentes, con una sola petición
+en vuelo. Para detener se espera a que termine cualquier operación de control
+actual; la liberación local nunca espera al ACK del stop. Un error de Media3
+no cierra `CameraClient`. Se puede reintentar explícitamente cuando termine la
+limpieza. Los timeouts de comandos TCP siguen la política de los Hitos 1 y 2.
+
+### Routing y permisos
+
+`CameraNetworkProvider` enumera `ConnectivityManager.allNetworks`, inspecciona
+capacidades y rutas de `LinkProperties` y selecciona únicamente Wi-Fi (sin VPN
+ni transporte celular) con una ruta unicast específica que contenga
+`192.168.42.1`. La coincidencia de prefijo más larga tiene preferencia. Una ruta
+predeterminada `0.0.0.0/0` no basta para identificar la YI. No se exige `INTERNET`
+ni `VALIDATED`, ni se usa `activeNetwork` como sustituto de esta selección.
+
+TCP recibe opcionalmente la `SocketFactory` de la Network; si no se proporciona,
+el cliente mantiene su comportamiento previo. Preview requiere identificar la
+Network y pasa **su** `network.socketFactory` a `RtspMediaSource.Factory`.
+No se llama a `bindProcessToNetwork`: el resto del tráfico puede seguir usando
+datos móviles. RTP sobre TCP evita abrir sockets UDP con routing independiente.
+Véase la [documentación oficial de RTSP y SocketFactory](https://developer.android.com/media/media3/exoplayer/rtsp).
+
+El manifiesto declara `INTERNET`, `ACCESS_NETWORK_STATE` y
+`NEARBY_WIFI_DEVICES` con `neverForLocation`. En Android 13+ se solicita el
+permiso de dispositivos cercanos al conectar/iniciar preview si falta. No se
+solicita ubicación. Si se deniega, se intenta la operación: en SDK 36 sin la
+protección experimental puede funcionar; con ella activa habrá que conceder
+el permiso desde ajustes para recuperar el acceso local.
+
+Prueba experimental en Android 16 (targetSdk sigue siendo **36**):
+
+```sh
+adb shell am compat enable RESTRICT_LOCAL_NETWORK es.jcprieto.yiactioncontroller
+adb reboot
+```
+
+Tras reiniciar, abrir la app, conceder **Dispositivos cercanos** al solicitarlo (o en Ajustes → Aplicaciones →
+YiActionController → Permisos), conectar al Wi-Fi
+YI y repetir inicio/parada con datos móviles activos. Para desactivar:
+
+```sh
+adb shell am compat disable RESTRICT_LOCAL_NETWORK es.jcprieto.yiactioncontroller
+adb reboot
+```
+
+Android 17 / targetSdk 37 introduce `ACCESS_LOCAL_NETWORK`; no se declara ni
+implementa todavía.
+Referencia: [protección de red local de Android](https://developer.android.com/privacy-and-security/local-network-permission).
+
+### Estados y ciclo de vida
+
+`CameraViewModel` mantiene `CameraClient`, el proveedor de Network y
+`CameraPreviewController`, que gobierna `Media3PreviewPlayer`. El reproductor
+no se crea desde Compose. `PlayerView` se adjunta con `AndroidView`, en una
+superficie 16:9, y elimina su referencia al player al abandonar la composición.
+
+La UI separa sesión TCP, aceptación del control de streaming y reproducción.
+`START_ACCEPTED` solo significa ACK de `259`; **En directo** requiere
+`STATE_READY` e `isPlaying=true`. `Player.Listener` procesa buffering, cambios
+de reproducción y errores. `preview_status`, `streaming_status` y
+`dual_stream_status` siguen visibles en el diagnóstico completo de configuración.
+
+La rotación conserva el ViewModel y el reproductor. `Activity.onStop` detiene
+preview al abandonar la pantalla, exceptuando cambios de configuración. No se
+reinicia al volver a foreground. Detener, desconectar cámara, perder la Network,
+un error fatal o `ViewModel.onCleared` liberan el player; `release` es idempotente.
+No hay servicio ni reproducción en segundo plano.
+
+Preview no bloquea foto/grabación salvo mientras haya un comando TCP pendiente.
+El evento `vf_start` de preview no debe marcar como inactiva una grabación en
+curso; la solicitud de detener grabación mantiene su semántica del Hito 2.
+La simultaneidad real depende del firmware y queda pendiente de validación.
+
+### Verificación y límites
+
+- **Validado físicamente:** Hitos 1 y 2 según confirmación del usuario.
+- **Tests locales:** tokens de `259`/`260`, rechazos, eventos intercalados,
+  selección Wi-Fi sin Internet frente a celular, prioridad por subred, callbacks
+  de reproducción, liberación idempotente, desconexión, pérdida de red, error
+  fatal, reintento y background durante un inicio pendiente. Regresión Hitos 1/2.
+- **Implementado, pendiente de validar físicamente:** ACK de preview en esta
+  cámara, decodificación RTSP, datos móviles simultáneos, rotación con imagen,
+  segundo plano, grabación con preview y `RESTRICT_LOCAL_NETWORK`.
+
+Prueba física propuesta: conectar con datos móviles activos; iniciar preview;
+confirmar imagen/En directo; rotar; iniciar/detener grabación con preview;
+detener/reiniciar preview; salir a Home y volver (sin autoarranque); apagar el
+Wi-Fi o la cámara; reconectar y reintentar. Repetir con protección local activa.
+
+Limitaciones: sin fallback RTP/UDP, reconexión automática, pantalla completa,
+galería, listado/descarga/reproducción de archivos, cambios de resolución,
+configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 4.
+
+Verificación final:
+
+```sh
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+```

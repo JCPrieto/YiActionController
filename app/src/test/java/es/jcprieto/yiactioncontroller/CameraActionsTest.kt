@@ -1,5 +1,7 @@
 package es.jcprieto.yiactioncontroller
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -10,6 +12,41 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 
 class CameraActionsTest {
+    @Test
+    fun previewCommandsUseCurrentTokenAndEventsNeverCompleteThem() = runBlocking {
+        ServerSocket(0).use { server ->
+            CameraClient("127.0.0.1", server.localPort).use { client ->
+                for (token in listOf(7, 29)) {
+                    client.connect()
+                    server.accept().use { peer ->
+                        peer.authenticate(client, token)
+                        val starting = async(Dispatchers.Default) { client.startPreview() }
+                        assertEquals(CameraRequest(CameraCommand.START_PREVIEW, token), peer.request())
+                        peer.send("""{"msg_id":7,"type":"vf_start"}""")
+                        peer.assertNoRequest()
+                        assertFalse(starting.isCompleted)
+                        peer.reply(CameraCommand.START_PREVIEW)
+                        assertTrue(starting.await().accepted)
+                        client.awaitState { it.canSendCommand }
+                        val stopping = async(Dispatchers.Default) { client.stopPreview() }
+                        assertEquals(CameraRequest(CameraCommand.STOP_PREVIEW, token), peer.request())
+                        peer.reply(CameraCommand.STOP_PREVIEW)
+                        assertTrue(stopping.await().accepted)
+                        client.awaitState { it.canSendCommand }
+                        val rejected = async(Dispatchers.Default) { client.startPreview() }
+                        assertEquals(CameraCommand.START_PREVIEW, peer.request().messageId)
+                        peer.reply(CameraCommand.START_PREVIEW, -42)
+                        assertFalse(rejected.await().accepted)
+                        val state = client.awaitState { it.canSendCommand }
+                        assertEquals(ConnectionStatus.CONNECTED, state.connection)
+                        assertTrue(state.error!!.contains("-42"))
+                    }
+                    client.disconnect()
+                }
+            }
+        }
+    }
+
     @Test
     fun videoEventsWinOverStaleActionSnapshotsInEveryArrivalOrder() {
         for (start in listOf(true, false)) {

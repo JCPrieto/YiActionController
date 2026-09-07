@@ -1,36 +1,65 @@
 package es.jcprieto.yiactioncontroller
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.PlayerView
 
+@UnstableApi
 class MainActivity : ComponentActivity() {
+    private val model by lazy { ViewModelProvider(this)[CameraViewModel::class.java] }
+    private var permissionAction: (() -> Unit)? = null
+    private val nearbyPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        // SDK 36 without experimental protection can still use the LAN if permission is denied.
+        permissionAction?.invoke()
+        permissionAction = null
+    }
+
+    private fun withNearbyPermission(action: () -> Unit) {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
+            permissionAction = action
+            nearbyPermission.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else action()
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations) model.onBackground()
+        super.onStop()
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-                val model: CameraViewModel = viewModel()
                 val state by model.state.collectAsStateWithLifecycle()
+                val preview by model.previewState.collectAsStateWithLifecycle()
+                val player by model.player.collectAsStateWithLifecycle()
+                val network by model.cameraNetwork.collectAsStateWithLifecycle()
                 Diagnostics(
-                    state, model::connect, model::disconnect, model::refresh,
-                    model::takePhoto, model::startRecording, model::stopRecording
+                    state, { withNearbyPermission(model::connect) }, model::disconnect, model::refresh,
+                    model::takePhoto, model::startRecording, model::stopRecording,
+                    preview, player, network != null, { withNearbyPermission(model::startPreview) }, model::stopPreview
                 )
             }
         }
@@ -38,6 +67,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+@UnstableApi
 private fun Diagnostics(
     state: CameraState,
     connect: () -> Unit,
@@ -46,6 +76,11 @@ private fun Diagnostics(
     takePhoto: () -> Unit,
     startRecording: () -> Unit,
     stopRecording: () -> Unit,
+    preview: PreviewStatus,
+    player: Player?,
+    networkFound: Boolean,
+    startPreview: () -> Unit,
+    stopPreview: () -> Unit,
 ) {
     Scaffold { padding ->
         Column(
@@ -72,6 +107,36 @@ private fun Diagnostics(
                 enabled = state.canSendCommand,
             ) { Text(if (state.pending.isEmpty()) "Consultar batería y configuración" else "Consultando…") }
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Text("Vista previa", style = MaterialTheme.typography.titleLarge)
+            Text(
+                when (preview.state) {
+                    PreviewState.IDLE -> "Sin vista previa"
+                    PreviewState.STARTING -> "Iniciando…"
+                    PreviewState.BUFFERING -> "Buffering…"
+                    PreviewState.PLAYING -> "En directo"
+                    PreviewState.STOPPING -> "Deteniendo…"
+                    PreviewState.ERROR -> "Error"
+                }
+            )
+            Text(if (networkFound) "Wi-Fi con ruta a la YI identificada" else "Wi-Fi de la YI no encontrada")
+            Text("Control de streaming: ${preview.control}", style = MaterialTheme.typography.bodySmall)
+            Button(
+                onClick = startPreview, enabled = state.canSendCommand && !preview.controlPending &&
+                        preview.state in setOf(PreviewState.IDLE, PreviewState.ERROR)
+            ) { Text("Iniciar vista previa") }
+            OutlinedButton(
+                onClick = stopPreview,
+                enabled = preview.state != PreviewState.IDLE
+            ) { Text("Detener vista previa") }
+            preview.error?.let { Text("${preview.errorType}: $it", color = MaterialTheme.colorScheme.error) }
+            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentAlignment = Alignment.Center) {
+                if (player == null) Text("Sin vídeo") else AndroidView(
+                    factory = { context -> PlayerView(context).apply { useController = false } },
+                    update = { it.player = player },
+                    onRelease = { it.player = null },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             HorizontalDivider()
             Text("Control", style = MaterialTheme.typography.titleLarge)
             Button(onClick = takePhoto, enabled = state.canTakePhoto) { Text("Hacer foto") }

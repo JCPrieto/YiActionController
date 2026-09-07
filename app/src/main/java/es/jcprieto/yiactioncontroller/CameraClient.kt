@@ -13,15 +13,18 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
+import javax.net.SocketFactory
 
 /** One IO worker owns all reads, writes and pending requests for a session. */
 class CameraClient(
     private val host: String = "192.168.42.1",
     private val port: Int = 7878,
     private val responseTimeoutMillis: Long = 5_000,
+    private val socketFactory: SocketFactory = SocketFactory.getDefault(),
 ) : AutoCloseable {
-    private class Session {
-        val socket = Socket()
+    private class Session(val factory: SocketFactory) {
+        var socket: Socket? = null
+        var previewResult: Pair<Int, CompletableDeferred<CameraControlResult>>? = null
         val commands = Channel<List<Int>>(1)
 
         // Guarded by lock; reserve immediately so rapid taps cannot queue multiple actions.
@@ -35,9 +38,9 @@ class CameraClient(
     private val mutableState = MutableStateFlow(CameraState())
     val state = mutableState.asStateFlow()
 
-    fun connect() = synchronized(lock) {
+    fun connect(factory: SocketFactory = socketFactory) = synchronized(lock) {
         if (session != null) return@synchronized
-        val current = Session()
+        val current = Session(factory)
         session = current
         mutableState.value = CameraState(connection = ConnectionStatus.CONNECTING)
         current.job = scope.launch { runSession(current) }
@@ -47,6 +50,24 @@ class CameraClient(
     fun takePhoto() = submit(listOf(CameraCommand.TAKE_PHOTO), CameraAction.TAKE_PHOTO)
     fun startRecording() = submit(listOf(CameraCommand.START_RECORDING), CameraAction.START_RECORDING)
     fun stopRecording() = submit(listOf(CameraCommand.STOP_RECORDING), CameraAction.STOP_RECORDING)
+
+    suspend fun startPreview(): CameraControlResult = previewCommand(CameraCommand.START_PREVIEW)
+    suspend fun stopPreview(): CameraControlResult = previewCommand(CameraCommand.STOP_PREVIEW)
+
+    private suspend fun previewCommand(id: Int): CameraControlResult {
+        val result = synchronized(lock) {
+            val current = session
+            if (current == null || !mutableState.value.canSendCommand) null else {
+                val deferred = CompletableDeferred<CameraControlResult>()
+                current.previewResult = id to deferred
+                submit(listOf(id))
+                if (id == CameraCommand.START_PREVIEW) mutableState.value =
+                    mutableState.value.copy(previewControlRequested = true)
+                deferred
+            }
+        } ?: return CameraControlResult(false, "Cámara desconectada o petición pendiente")
+        return result.await()
+    }
 
     private fun submit(commands: List<Int>, action: CameraAction? = null) = synchronized(lock) {
         val current = session ?: return@synchronized
@@ -62,6 +83,11 @@ class CameraClient(
         mutableState.value = previous.copy(
             pending = current.reservedCommands,
             pendingAction = action,
+            recordingStopRequested = when (action) {
+                CameraAction.STOP_RECORDING -> true
+                CameraAction.START_RECORDING -> false
+                else -> previous.recordingStopRequested
+            },
             error = null,
             recording = when (action) {
                 CameraAction.START_RECORDING -> RecordingState.STARTING
@@ -76,6 +102,7 @@ class CameraClient(
         session = null // An old worker must never overwrite a new session's state.
         previous?.commands?.close()
         previous?.job?.cancel()
+        previous?.previewResult?.second?.complete(CameraControlResult(false, "Cámara desconectada"))
         runCatching { previous?.socket?.close() } // Unblocks read/connect immediately.
         mutableState.value = CameraState()
     }
@@ -92,7 +119,14 @@ class CameraClient(
     private suspend fun runSession(current: Session) {
         var failure: String? = null
         try {
-            val socket = current.socket
+            val socket = current.factory.createSocket()
+            synchronized(lock) {
+                if (session !== current) {
+                    socket.close()
+                    return
+                }
+                current.socket = socket
+            }
             socket.connect(InetSocketAddress(host, port), 5_000)
             socket.soTimeout = 250 // Wake up for queued commands and response deadlines.
             socket.tcpNoDelay = true
@@ -186,12 +220,27 @@ class CameraClient(
                     }
                     update(current) {
                         var next = it.applyMessage(message, raw)
+                        if (completesRequest && current.previewResult?.first == message.messageId) {
+                            if (message.messageId == CameraCommand.STOP_PREVIEW && message.rval == 0 ||
+                                message.messageId == CameraCommand.START_PREVIEW && message.rval != 0
+                            ) {
+                                next = next.copy(previewControlRequested = false)
+                            }
+                            current.previewResult?.second?.complete(
+                                CameraControlResult(
+                                    message.rval == 0,
+                                    if (message.rval == 0) null else "Comando ${message.messageId}: rval=${message.rval}",
+                                )
+                            )
+                            current.previewResult = null
+                        }
                         if (message.messageId == GET_CONFIG && completesRequest &&
                             it.recordingRevision != configRecordingRevision
                         ) {
                             next = next.copy(recording = it.recording)
                         }
                         if (completesRequest && it.pendingAction?.commandId == message.messageId) {
+                            if (message.rval != 0) next = next.copy(recordingStopRequested = false)
                             if (it.pendingAction != CameraAction.TAKE_PHOTO) {
                                 // ACK (including rejection) is not a report of actual recording state.
                                 // Preserve any real status event already received, then request fresh status.
@@ -212,9 +261,10 @@ class CameraClient(
         } catch (exception: Exception) {
             failure = exception.message ?: exception.javaClass.simpleName
         } finally {
-            runCatching { current.socket.close() }
+            runCatching { current.socket?.close() }
             current.commands.close()
             synchronized(lock) {
+                current.previewResult?.second?.complete(CameraControlResult(false, failure ?: "Cámara desconectada"))
                 if (session === current) {
                     session = null
                     val previous = mutableState.value

@@ -8,7 +8,11 @@ object CameraCommand {
     const val START_RECORDING = 513
     const val STOP_RECORDING = 514
     const val EVENT = 7
+    const val START_PREVIEW = 259
+    const val STOP_PREVIEW = 260
 }
+
+data class CameraControlResult(val accepted: Boolean, val error: String? = null)
 
 enum class CameraAction(val commandId: Int) {
     TAKE_PHOTO(CameraCommand.TAKE_PHOTO),

@@ -5,6 +5,19 @@ import org.junit.Test
 
 class CameraActionStateTest {
     @Test
+    fun previewViewfinderEventDoesNotStopConcurrentRecording() {
+        val state = CameraState(recording = RecordingState.RECORDING, previewControlRequested = true)
+        assertEquals(
+            RecordingState.RECORDING,
+            state.receive("""{"msg_id":7,"type":"vf_start"}""").recording
+        )
+        assertEquals(
+            RecordingState.IDLE,
+            state.copy(recordingStopRequested = true).receive("""{"msg_id":7,"type":"vf_start"}""").recording
+        )
+    }
+
+    @Test
     fun observedVideoEventsDriveStateAndSurviveBatteryEvents() {
         val started = CameraState().receive("""{"msg_id":7,"type":"start_video_record"}""")
         assertEquals(RecordingState.RECORDING, started.recording)
