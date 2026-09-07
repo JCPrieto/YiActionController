@@ -53,7 +53,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun startPreview() {
         previewNetwork = networks.refresh()
-        preview.start(previewNetwork?.socketFactory)
+        preview.start(previewNetwork?.let { network ->
+            PreviewTransport(network.socketFactory) { socket -> network.bindSocket(socket) }
+        })
     }
 
     fun stopPreview() = preview.stop()

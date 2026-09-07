@@ -10,13 +10,16 @@ import org.junit.Test
 import javax.net.SocketFactory
 
 class CameraPreviewControllerTest {
+    private val transport = PreviewTransport(SocketFactory.getDefault()) { }
     private class FakePlayback : PreviewPlayback {
         val signals = PreviewPlaybackSignals()
         override val status = signals.status
         var allocated = false
         var starts = 0
         var releases = 0
-        override fun start(socketFactory: SocketFactory) {
+        var receivedTransport: PreviewTransport? = null
+        override fun start(transport: PreviewTransport) {
+            receivedTransport = transport
             allocated = true; starts++; signals.starting()
         }
 
@@ -35,12 +38,13 @@ class CameraPreviewControllerTest {
             stop.await()
         })
         try {
-            controller.start(SocketFactory.getDefault())
+            controller.start(transport)
             yield()
             assertEquals(0, engine.starts)
             start.complete(CameraControlResult(true))
             yield()
             assertEquals(1, engine.starts)
+            assertSame(transport, engine.receivedTransport)
             engine.signals.buffering()
             yield()
             assertEquals(PreviewState.BUFFERING, controller.status.value.state)
@@ -73,7 +77,7 @@ class CameraPreviewControllerTest {
         try {
             controller.start(null)
             assertEquals(PreviewError.NETWORK_NOT_FOUND, controller.status.value.errorType)
-            controller.start(SocketFactory.getDefault())
+            controller.start(transport)
             yield()
             assertEquals(PreviewError.START_CONTROL, controller.status.value.errorType)
             assertEquals(0, engine.starts)
@@ -95,7 +99,7 @@ class CameraPreviewControllerTest {
                 this, engine, { true },
                 { CameraControlResult(true) }, { CameraControlResult(true) })
             try {
-                controller.start(SocketFactory.getDefault())
+                controller.start(transport)
                 yield()
                 assertTrue(engine.allocated)
                 when (cause) {
@@ -106,7 +110,7 @@ class CameraPreviewControllerTest {
                 withTimeout(2_000) { controller.status.first { it.state == PreviewState.ERROR && !it.controlPending } }
                 assertFalse(engine.allocated)
                 assertEquals(cause, controller.status.value.errorType)
-                controller.start(SocketFactory.getDefault()) // Explicit retry, no auto restart.
+                controller.start(transport) // Explicit retry, no auto restart.
                 yield()
                 assertEquals(2, engine.starts)
             } finally {
@@ -124,7 +128,7 @@ class CameraPreviewControllerTest {
             stops++; CameraControlResult(true)
         })
         try {
-            controller.start(SocketFactory.getDefault())
+            controller.start(transport)
             yield()
             controller.stop()
             ack.complete(CameraControlResult(true))

@@ -184,8 +184,12 @@ alineado con Kotlin 2.2.10 incluido por el AGP del proyecto.
 
 El usuario ha confirmado los Hitos 1 y 2 completos y validados físicamente,
 incluida la corrección de los estados de grabación descrita anteriormente.
-La vista previa de este hito está implementada, pero **pendiente de prueba
-física RTSP**. Los tests JVM no reproducen ni simulan un servidor RTSP real.
+La vista previa está implementada, pero **pendiente de reproducción física
+correcta**. En la prueba del 07/09/2026, Media3 obtuvo información H.264
+432 × 240 y la cámara rechazó el SETUP con `461` al solicitar RTP sobre TCP.
+Esto no demuestra reproducción de frames ni que UDP funcione. Se adapta el
+preview a **RTP/UDP** para la siguiente prueba. Los tests JVM no reproducen
+ni simulan un servidor RTSP real.
 
 Se usan exclusivamente `media3-exoplayer`, `media3-exoplayer-rtsp` y `media3-ui`
 de AndroidX Media3 **1.11.0**, declarados en el version catalog.
@@ -193,7 +197,7 @@ de AndroidX Media3 **1.11.0**, declarados en el version catalog.
 | Canal             | Destino                    | Función                                              |
 |-------------------|----------------------------|------------------------------------------------------|
 | Control existente | TCP `192.168.42.1:7878`    | Token, diagnóstico, foto/vídeo y comandos de preview |
-| Vídeo             | `rtsp://192.168.42.1/live` | Media3 con RTP intercalado sobre TCP                 |
+| Vídeo             | `rtsp://192.168.42.1/live` | Negociación RTSP por TCP, RTP/RTCP por UDP           |
 
 ### Inicio y parada
 
@@ -203,8 +207,9 @@ de AndroidX Media3 **1.11.0**, declarados en el version catalog.
 3. Se envía `START_PREVIEW=259` con el token actual y se espera `rval=0`.
    Un rechazo se muestra como error de control y no crea el reproductor.
 4. Solo entonces `Media3PreviewPlayer` crea ExoPlayer y un `RtspMediaSource`
-   explícito con la socket factory de esa Network, `setForceUseRtpTcp(true)`
-   y timeout de 8 segundos. No se habilita logging de protocolo.
+   explícito con la socket factory de esa Network y canales RTP/RTCP UDP
+   vinculados individualmente a la misma Network. Timeout de recepción UDP:
+   8 segundos. No se habilita logging de protocolo ni fallback RTP/TCP.
 5. **Detener vista previa** libera localmente el reproductor primero y después
    envía `STOP_PREVIEW=260`. Si había un inicio en vuelo, espera su respuesta
    para detenerlo, sin llegar a crear el player si ya se solicitó la parada.
@@ -226,10 +231,26 @@ ni `VALIDATED`, ni se usa `activeNetwork` como sustituto de esta selección.
 
 TCP recibe opcionalmente la `SocketFactory` de la Network; si no se proporciona,
 el cliente mantiene su comportamiento previo. Preview requiere identificar la
-Network y pasa **su** `network.socketFactory` a `RtspMediaSource.Factory`.
+Network y pasa **su** `network.socketFactory` a la conexión RTSP de Media3.
 No se llama a `bindProcessToNetwork`: el resto del tráfico puede seguir usando
-datos móviles. RTP sobre TCP evita abrir sockets UDP con routing independiente.
+datos móviles. Cada `DatagramSocket` RTP/RTCP se vincula mediante
+`network.bindSocket(socket)` antes de reservar su puerto local. Se reservan
+puertos consecutivos (RTP par y RTCP impar); un fallo de binding cierra los
+sockets y no recurre a la red predeterminada. RTCP queda reservado, como en el
+canal UDP estándar de Media3; no se añade procesamiento ni envío de informes RTCP.
 Véase la [documentación oficial de RTSP y SocketFactory](https://developer.android.com/media/media3/exoplayer/rtsp).
+
+**Adaptador específico de Media3 1.11.0:** su Factory pública no permite
+inyectar sockets UDP. `YiUdpMediaSource`, aislado en el paquete
+`androidx.media3.exoplayer.rtsp`, accede al constructor y a `RtpDataChannel`
+con visibilidad de paquete. No usa reflexión, sustituye clases ni copia el
+player. Usa el extractor RTP de Media3 con un canal de datagramas propio.
+Es una dependencia de APIs internas: al actualizar Media3 hay que revisar y
+compilar este adaptador contra el
+[código de la versión](https://github.com/androidx/media/blob/1.11.0/libraries/exoplayer_rtsp/src/main/java/androidx/media3/exoplayer/rtsp/RtspMediaSource.java).
+`PreviewUdpSockets` cierra todos los pares antes del release de ExoPlayer para
+desbloquear inmediatamente lecturas, incluso si todavía se estaban creando.
+No se modifica `CameraClient` ni su canal de control TCP para esta adaptación.
 
 El manifiesto declara `INTERNET`, `ACCESS_NETWORK_STATE` y
 `NEARBY_WIFI_DEVICES` con `neverForLocation`. En Android 13+ se solicita el
@@ -284,11 +305,16 @@ La simultaneidad real depende del firmware y queda pendiente de validación.
 
 ### Verificación y límites
 
-- **Validado físicamente:** Hitos 1 y 2 según confirmación del usuario.
+- **Validado físicamente:** Hitos 1 y 2 según confirmación del usuario. En
+  preview se ha observado el rechazo `SETUP 461` con RTP/TCP, no imagen en directo.
 - **Tests locales:** tokens de `259`/`260`, rechazos, eventos intercalados,
   selección Wi-Fi sin Internet frente a celular, prioridad por subred, callbacks
   de reproducción, liberación idempotente, desconexión, pérdida de red, error
   fatal, reintento y background durante un inicio pendiente. Regresión Hitos 1/2.
+  UDP local: binding de ambos sockets antes de reservar puertos, pares par/impar,
+  limpieza ante error, release idempotente y durante apertura, datagramas grandes
+  y lecturas parciales, timeout y desbloqueo del receptor al cerrar. El binding
+  Android real se sustituye por un callback en JVM: requiere prueba física.
 - **Implementado, pendiente de validar físicamente:** ACK de preview en esta
   cámara, decodificación RTSP, datos móviles simultáneos, rotación con imagen,
   segundo plano, grabación con preview y `RESTRICT_LOCAL_NETWORK`.
@@ -298,7 +324,9 @@ confirmar imagen/En directo; rotar; iniciar/detener grabación con preview;
 detener/reiniciar preview; salir a Home y volver (sin autoarranque); apagar el
 Wi-Fi o la cámara; reconectar y reintentar. Repetir con protección local activa.
 
-Limitaciones: sin fallback RTP/UDP, reconexión automática, pantalla completa,
+Limitaciones: UDP sin fallback automático a RTP/TCP; recepción UDP y routing
+simultáneo con datos móviles aún pendientes de validar en la cámara. Sin
+reconexión automática, pantalla completa,
 galería, listado/descarga/reproducción de archivos, cambios de resolución,
 configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 4.
 

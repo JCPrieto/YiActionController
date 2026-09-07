@@ -6,7 +6,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.net.DatagramSocket
 import javax.net.SocketFactory
+
+/** Captures both bindings from the same selected Network for the entire preview attempt. */
+data class PreviewTransport(
+    val socketFactory: SocketFactory,
+    val bindDatagramSocket: (DatagramSocket) -> Unit,
+)
 
 enum class PreviewState { IDLE, STARTING, PLAYING, BUFFERING, STOPPING, ERROR }
 enum class PreviewError { START_CONTROL, STOP_CONTROL, RTSP, RTSP_TIMEOUT, MEDIA3, NETWORK_NOT_FOUND, NETWORK_LOST, CAMERA_DISCONNECTED }
@@ -22,7 +29,7 @@ data class PreviewStatus(
 /** Test seam for playback callbacks; Android/Media3 remains in Media3PreviewPlayer. */
 interface PreviewPlayback {
     val status: StateFlow<PreviewStatus>
-    fun start(socketFactory: SocketFactory)
+    fun start(transport: PreviewTransport)
     fun release()
 }
 
@@ -51,14 +58,14 @@ class CameraPreviewController(
         }
     }
 
-    fun start(socketFactory: SocketFactory?) {
+    fun start(transport: PreviewTransport?) {
         if (released || wanted || operation?.isActive == true || cleanup?.isActive == true) return
         if (!connected()) {
             mutableStatus.value =
                 PreviewStatus(PreviewState.ERROR, "Cámara desconectada", PreviewError.CAMERA_DISCONNECTED)
             return
         }
-        if (socketFactory == null) {
+        if (transport == null) {
             mutableStatus.value = PreviewStatus(
                 PreviewState.ERROR,
                 "No se encontró la Wi-Fi con ruta a la YI",
@@ -81,7 +88,7 @@ class CameraPreviewController(
             mutableStatus.value = PreviewStatus(PreviewState.STARTING, control = PreviewControlState.START_ACCEPTED)
             engineActive = true
             try {
-                playback.start(socketFactory)
+                playback.start(transport)
             } catch (_: Exception) {
                 stop(PreviewError.MEDIA3, "No se pudo crear el reproductor")
             }

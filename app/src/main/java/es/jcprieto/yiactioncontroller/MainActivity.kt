@@ -108,6 +108,7 @@ private fun Diagnostics(
             ) { Text(if (state.pending.isEmpty()) "Consultar batería y configuración" else "Consultando…") }
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Text("Vista previa", style = MaterialTheme.typography.titleLarge)
+            Text("Transporte: RTP/UDP · RTSP por TCP", style = MaterialTheme.typography.bodySmall)
             Text(
                 when (preview.state) {
                     PreviewState.IDLE -> "Sin vista previa"
