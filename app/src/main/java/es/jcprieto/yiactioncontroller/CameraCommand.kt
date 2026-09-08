@@ -12,7 +12,12 @@ object CameraCommand {
     const val STOP_PREVIEW = 260
 }
 
-data class CameraControlResult(val accepted: Boolean, val error: String? = null)
+data class CameraControlResult(val accepted: Boolean, val error: String? = null, val rval: Int? = null)
+
+/** Observed rejection, not a claim that -21 always means "already started". */
+object CameraErrorCode {
+    const val PREVIEW_RESTART_CANDIDATE = -21
+}
 
 enum class CameraAction(val commandId: Int) {
     TAKE_PHOTO(CameraCommand.TAKE_PHOTO),

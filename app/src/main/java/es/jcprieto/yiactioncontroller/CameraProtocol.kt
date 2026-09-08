@@ -32,6 +32,7 @@ data class CameraState(
     val pending: Set<Int> = emptySet(),
     val pendingAction: CameraAction? = null,
     val previewControlRequested: Boolean = false,
+    val awaitingPreviewStop: Boolean = false,
     internal val recordingStopRequested: Boolean = false,
     val recording: RecordingState = RecordingState.UNKNOWN,
     val lastRecordingEvent: String? = null,
@@ -45,7 +46,7 @@ data class CameraState(
 ) {
     val canSendCommand: Boolean
         get() = connection == ConnectionStatus.CONNECTED &&
-                token != null && token > 0 && pending.isEmpty() && pendingAction == null
+                token != null && token > 0 && pending.isEmpty() && pendingAction == null && !awaitingPreviewStop
     val canTakePhoto: Boolean get() = canSendCommand
     val canStartRecording: Boolean get() = canSendCommand && recording == RecordingState.IDLE
 

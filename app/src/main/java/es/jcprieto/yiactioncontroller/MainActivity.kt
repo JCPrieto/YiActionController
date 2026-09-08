@@ -64,7 +64,7 @@ class MainActivity : ComponentActivity() {
                     state, { withNearbyPermission(model::connect) }, model::disconnect, model::refresh,
                     model::takePhoto, model::startRecording, model::stopRecording,
                     preview, player, network != null, { withNearbyPermission(model::startPreview) }, model::stopPreview,
-                    history, model::clearDiagnosticHistory
+                    history, model::clearDiagnosticHistory, model::restartPreview
                 )
             }
         }
@@ -88,6 +88,7 @@ private fun Diagnostics(
     stopPreview: () -> Unit,
     history: List<String>,
     clearHistory: () -> Unit,
+    restartPreview: () -> Unit,
 ) {
     Scaffold { padding ->
         Column(
@@ -133,6 +134,13 @@ private fun Diagnostics(
                 onClick = startPreview, enabled = state.canSendCommand && !preview.controlPending &&
                         preview.state in setOf(PreviewState.IDLE, PreviewState.ERROR)
             ) { Text("Iniciar vista previa") }
+            if (preview.recoveryAvailable) {
+                OutlinedButton(
+                    onClick = restartPreview,
+                    enabled = state.canSendCommand && state.recording == RecordingState.IDLE && !preview.controlPending,
+                ) { Text("Reiniciar vista previa") }
+                Text("Recuperación de 259/-21: detiene el visor y espera vf_stop antes de iniciarlo. Solo con grabación inactiva.")
+            }
             OutlinedButton(
                 onClick = stopPreview,
                 enabled = preview.state != PreviewState.IDLE

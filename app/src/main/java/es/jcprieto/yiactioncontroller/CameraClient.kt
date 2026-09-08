@@ -26,6 +26,8 @@ class CameraClient(
     private class Session(val factory: SocketFactory) {
         var socket: Socket? = null
         var previewResult: Pair<Int, CompletableDeferred<CameraControlResult>>? = null
+        var stopConfirmation: CompletableDeferred<Boolean>? = null
+        var stopConfirmationArmed = false
         val commands = Channel<List<Int>>(1)
 
         // Guarded by lock; reserve immediately so rapid taps cannot queue multiple actions.
@@ -55,6 +57,43 @@ class CameraClient(
 
     suspend fun startPreview(): CameraControlResult = previewCommand(CameraCommand.START_PREVIEW)
     suspend fun stopPreview(): CameraControlResult = previewCommand(CameraCommand.STOP_PREVIEW)
+
+    /** Explicit recovery only. The continuous reader captures a fresh vf_stop, even before ACK. */
+    suspend fun stopPreviewAndAwaitVfStop(): CameraControlResult {
+        val current: Session
+        val confirmation = CompletableDeferred<Boolean>()
+        val response: CompletableDeferred<CameraControlResult>
+        synchronized(lock) {
+            current = session ?: return CameraControlResult(false, "Cámara desconectada")
+            if (!mutableState.value.canSendCommand || mutableState.value.recording != RecordingState.IDLE)
+                return CameraControlResult(false, "Reinicio no permitido: cámara ocupada o grabación no inactiva")
+            response = CompletableDeferred()
+            current.previewResult = CameraCommand.STOP_PREVIEW to response
+            current.stopConfirmation = confirmation
+            current.stopConfirmationArmed = false
+            submit(listOf(CameraCommand.STOP_PREVIEW))
+            mutableState.value = mutableState.value.copy(awaitingPreviewStop = true)
+            diagnostics.append("RECOVERY", "Enviar 260 y esperar ACK + vf_stop nuevo")
+        }
+        try {
+            val result = response.await()
+            if (!result.accepted) return result
+            val stopped = withTimeoutOrNull(PREVIEW_STOP_EVENT_TIMEOUT_MS) { confirmation.await() }
+            return when (stopped) {
+                true -> CameraControlResult(true)
+                false -> CameraControlResult(false, "Confirmación vf_stop cancelada: desconexión o grabación activa")
+                null -> CameraControlResult(false, "Timeout esperando vf_stop tras aceptar 260")
+            }.also { diagnostics.append("RECOVERY", it.error ?: "260 aceptado y vf_stop recibido") }
+        } finally {
+            synchronized(lock) {
+                if (current.stopConfirmation === confirmation) {
+                    current.stopConfirmation = null
+                    current.stopConfirmationArmed = false
+                    if (session === current) mutableState.value = mutableState.value.copy(awaitingPreviewStop = false)
+                }
+            }
+        }
+    }
 
     private suspend fun previewCommand(id: Int): CameraControlResult {
         val result = synchronized(lock) {
@@ -106,6 +145,7 @@ class CameraClient(
         previous?.commands?.close()
         previous?.job?.cancel()
         previous?.previewResult?.second?.complete(CameraControlResult(false, "Cámara desconectada"))
+        previous?.stopConfirmation?.complete(false)
         runCatching { previous?.socket?.close() } // Unblocks read/connect immediately.
         mutableState.value = CameraState()
     }
@@ -153,6 +193,8 @@ class CameraClient(
                 val request = CameraRequest(id, if (id == LOGIN) 0 else checkNotNull(token))
                 val raw = cameraJson.encodeToString(request)
                 update(current) {
+                    if (id == CameraCommand.STOP_PREVIEW && current.stopConfirmation != null)
+                        current.stopConfirmationArmed = true
                     if (id == CameraCommand.START_RECORDING || id == CameraCommand.STOP_RECORDING) {
                         actionRecordingRevision = it.recordingRevision
                     }
@@ -212,6 +254,12 @@ class CameraClient(
                     update(current) { it.copy(lastMessage = raw) }
                     val message = cameraJson.decodeFromString<CameraMessage>(raw)
                     update(current) { diagnostics.received(message); it }
+                    synchronized(lock) {
+                        if (session === current && current.stopConfirmationArmed && message.messageId == EVENT) {
+                            if (message.type == "vf_stop") current.stopConfirmation?.complete(true)
+                            if (message.type == "start_video_record") current.stopConfirmation?.complete(false)
+                        }
+                    }
                     val completesRequest = message.messageId != EVENT && message.rval != null &&
                             message.messageId in pending
                     if (message.messageId == LOGIN && LOGIN in pending) {
@@ -238,6 +286,7 @@ class CameraClient(
                                 CameraControlResult(
                                     message.rval == 0,
                                     if (message.rval == 0) null else "Comando ${message.messageId}: rval=${message.rval}",
+                                    message.rval,
                                 )
                             )
                             current.previewResult = null
@@ -273,6 +322,7 @@ class CameraClient(
             current.commands.close()
             synchronized(lock) {
                 current.previewResult?.second?.complete(CameraControlResult(false, failure ?: "Cámara desconectada"))
+                current.stopConfirmation?.complete(false)
                 if (session === current) {
                     diagnostics.append(
                         "TCP",
@@ -289,5 +339,9 @@ class CameraClient(
                 }
             }
         }
+    }
+
+    private companion object {
+        const val PREVIEW_STOP_EVENT_TIMEOUT_MS = 5_000L
     }
 }

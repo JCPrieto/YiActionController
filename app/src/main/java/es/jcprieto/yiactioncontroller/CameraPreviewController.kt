@@ -24,6 +24,7 @@ data class PreviewStatus(
     val errorType: PreviewError? = null,
     val control: PreviewControlState = PreviewControlState.UNKNOWN,
     val controlPending: Boolean = false,
+    val recoveryAvailable: Boolean = false,
 )
 
 /** Test seam for playback callbacks; Android/Media3 remains in Media3PreviewPlayer. */
@@ -40,6 +41,8 @@ class CameraPreviewController(
     private val connected: () -> Boolean,
     private val startControl: suspend () -> CameraControlResult,
     private val stopControl: suspend () -> CameraControlResult,
+    private val canRestart: () -> Boolean = { false },
+    private val stopAndConfirm: suspend () -> CameraControlResult = { CameraControlResult(false) },
 ) {
     private val mutableStatus = MutableStateFlow(PreviewStatus())
     val status = mutableStatus.asStateFlow()
@@ -58,7 +61,14 @@ class CameraPreviewController(
         }
     }
 
-    fun start(transport: PreviewTransport?) {
+    fun start(transport: PreviewTransport?) = begin(transport, recovering = false)
+
+    fun restart(transport: PreviewTransport?) {
+        if (!mutableStatus.value.recoveryAvailable || !canRestart()) return
+        begin(transport, recovering = true)
+    }
+
+    private fun begin(transport: PreviewTransport?, recovering: Boolean) {
         if (released || wanted || operation?.isActive == true || cleanup?.isActive == true) return
         if (!connected()) {
             mutableStatus.value =
@@ -77,12 +87,30 @@ class CameraPreviewController(
         mutableStatus.value = PreviewStatus(PreviewState.STARTING, controlPending = true)
         operation = scope.launch {
             if (!wanted) return@launch
+            if (recovering) {
+                playback.release()
+                val stopped = stopAndConfirm()
+                if (stopped.accepted) cameraMayStream = false
+                if (!wanted) return@launch
+                if (!stopped.accepted || !connected() || !canRestart()) {
+                    wanted = false
+                    mutableStatus.value = PreviewStatus(
+                        PreviewState.ERROR,
+                        stopped.error ?: "Reinicio cancelado: cámara desconectada, ocupada o grabación no inactiva",
+                        PreviewError.STOP_CONTROL
+                    )
+                    return@launch
+                }
+            }
             val result = startControl()
             cameraMayStream = cameraMayStream || result.accepted
             if (!wanted) return@launch // Stop/background/loss during the TCP handshake.
             if (!result.accepted) {
                 wanted = false
-                mutableStatus.value = PreviewStatus(PreviewState.ERROR, result.error, PreviewError.START_CONTROL)
+                mutableStatus.value = PreviewStatus(
+                    PreviewState.ERROR, result.error, PreviewError.START_CONTROL,
+                    recoveryAvailable = !recovering && result.rval == CameraErrorCode.PREVIEW_RESTART_CANDIDATE
+                )
                 return@launch
             }
             mutableStatus.value = PreviewStatus(PreviewState.STARTING, control = PreviewControlState.START_ACCEPTED)

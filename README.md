@@ -209,15 +209,16 @@ Para la próxima prueba: pulsar **Limpiar**, reproducir la secuencia
 preview → detener → foto → grabar → detener → preview. Si aparece el rechazo,
 consultar configuración y pulsar **Copiar historial** antes de cerrar la app.
 Compartir ese texto, indicando si los datos móviles estaban activos.
-El historial y su copia en el teléfono quedan pendientes de validación física.
+El usuario ha compartido el historial generado en la prueba física del 08/09/2026.
 
 El usuario ha confirmado los Hitos 1 y 2 completos y validados físicamente,
 incluida la corrección de los estados de grabación descrita anteriormente.
-La vista previa está implementada, pero **pendiente de reproducción física
-correcta**. En la prueba del 07/09/2026, Media3 obtuvo información H.264
+La vista previa UDP ha reproducido vídeo físicamente según las pruebas del
+usuario; quedan pendientes los escenarios indicados al final. En la prueba
+inicial del 07/09/2026, Media3 obtuvo información H.264
 432 × 240 y la cámara rechazó el SETUP con `461` al solicitar RTP sobre TCP.
-Esto no demuestra reproducción de frames ni que UDP funcione. Se adapta el
-preview a **RTP/UDP** para la siguiente prueba. Los tests JVM no reproducen
+Ese rechazo no demostraba reproducción de frames; las pruebas posteriores
+con **RTP/UDP** sí muestran reproducción. Los tests JVM no reproducen
 ni simulan un servidor RTSP real.
 
 Se usan exclusivamente `media3-exoplayer`, `media3-exoplayer-rtsp` y `media3-ui`
@@ -229,6 +230,31 @@ de AndroidX Media3 **1.11.0**, declarados en el version catalog.
 | Vídeo             | `rtsp://192.168.42.1/live` | Negociación RTSP por TCP, RTP/RTCP por UDP           |
 
 ### Inicio y parada
+
+**Recuperación explícita de 259/-21:** tras ese rechazo aparece **Reiniciar
+vista previa**. Solo está habilitado con sesión conectada, token, grabación
+`IDLE` y ninguna petición pendiente. No se permite en `UNKNOWN`, `STARTING`,
+`RECORDING` ni `STOPPING`. Envía 260 y exige tanto `rval=0` como un nuevo
+`vf_stop` recibido después de enviar el comando (acepta evento antes o después
+del ACK). Durante la confirmación se bloquean otras peticiones de control.
+Espera como máximo cinco segundos tras el ACK; si falta el evento, muestra
+error sin cerrar el TCP ni enviar 259. El timeout del propio comando conserva
+la política de desconexión existente.
+
+Solo tras ambas confirmaciones vuelve a comprobar el estado y envía un único
+259; Media3 se crea únicamente con `rval=0`. No hay bucles ni reintentos
+automáticos. Detener, background, desconexión o pérdida de Network durante la
+recuperación impiden iniciar el player. Se registra la operación en el
+historial (`UI`, `RECOVERY`, `TX`, `RX`, `EVENT`, `PREVIEW`).
+
+**Evidencia física del 08/09/2026:** inicio UDP con `PLAYING`, parada 260
+aceptada seguida de `vf_stop`, foto completada seguida de `vf_start`, grabación
+completada (`video_record_complete`) seguida de otro `vf_start`, y rechazo
+259/-21 al intentar iniciar de nuevo. Esto sugiere un conflicto de estado del
+visor, pero **no confirma el significado general de -21**. La nueva secuencia
+de recuperación está cubierta por tests y pendiente de validar en la cámara.
+No considera el rechazo como éxito ni abre RTSP basándose solo en
+`preview_status=on`.
 
 1. Conectar manualmente el teléfono al Wi-Fi de la YI y pulsar **Conectar**.
 2. Pulsar **Iniciar vista previa**. Se exige sesión TCP conectada y se confirma
@@ -335,7 +361,9 @@ La simultaneidad real depende del firmware y queda pendiente de validación.
 ### Verificación y límites
 
 - **Validado físicamente:** Hitos 1 y 2 según confirmación del usuario. En
-  preview se ha observado el rechazo `SETUP 461` con RTP/TCP, no imagen en directo.
+  preview se ha observado `SETUP 461` con RTP/TCP y reproducción posterior con
+  UDP, inicio/parada/reinicio y aceptación de 259/260. Persiste el rechazo
+  259/-21 en la secuencia foto/grabación descrita arriba.
 - **Tests locales:** tokens de `259`/`260`, rechazos, eventos intercalados,
   selección Wi-Fi sin Internet frente a celular, prioridad por subred, callbacks
   de reproducción, liberación idempotente, desconexión, pérdida de red, error
@@ -344,8 +372,8 @@ La simultaneidad real depende del firmware y queda pendiente de validación.
   limpieza ante error, release idempotente y durante apertura, datagramas grandes
   y lecturas parciales, timeout y desbloqueo del receptor al cerrar. El binding
   Android real se sustituye por un callback en JVM: requiere prueba física.
-- **Implementado, pendiente de validar físicamente:** ACK de preview en esta
-  cámara, decodificación RTSP, datos móviles simultáneos, rotación con imagen,
+- **Implementado, pendiente de validar físicamente:** recuperación explícita
+  de 259/-21, datos móviles simultáneos, rotación con imagen,
   segundo plano, grabación con preview y `RESTRICT_LOCAL_NETWORK`.
 
 Prueba física propuesta: conectar con datos móviles activos; iniciar preview;
@@ -353,8 +381,8 @@ confirmar imagen/En directo; rotar; iniciar/detener grabación con preview;
 detener/reiniciar preview; salir a Home y volver (sin autoarranque); apagar el
 Wi-Fi o la cámara; reconectar y reintentar. Repetir con protección local activa.
 
-Limitaciones: UDP sin fallback automático a RTP/TCP; recepción UDP y routing
-simultáneo con datos móviles aún pendientes de validar en la cámara. Sin
+Limitaciones: UDP sin fallback automático a RTP/TCP; routing
+simultáneo con datos móviles aún pendiente de validar en la cámara. Sin
 reconexión automática, pantalla completa,
 galería, listado/descarga/reproducción de archivos, cambios de resolución,
 configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 4.

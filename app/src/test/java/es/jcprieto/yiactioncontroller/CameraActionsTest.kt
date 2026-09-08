@@ -13,6 +13,61 @@ import java.net.SocketTimeoutException
 
 class CameraActionsTest {
     @Test
+    fun recoveryStopRequiresFreshEventAndAckInEitherOrder() = runBlocking {
+        for (eventBeforeAck in listOf(true, false)) {
+            ServerSocket(0).use { server ->
+                CameraClient("127.0.0.1", server.localPort).use { client ->
+                    client.connect()
+                    server.accept().use { peer ->
+                        peer.authenticate(client, 29)
+                        peer.send("""{"msg_id":7,"type":"vf_stop"}""")
+                        client.awaitState { it.lastEvent?.contains("vf_stop") == true }
+                        val stopping = async(Dispatchers.Default) { client.stopPreviewAndAwaitVfStop() }
+                        assertEquals(CameraRequest(CameraCommand.STOP_PREVIEW, 29), peer.request())
+                        assertTrue(client.state.value.awaitingPreviewStop)
+                        if (eventBeforeAck) peer.send("""{"msg_id":7,"type":"vf_stop"}""")
+                        else peer.reply(CameraCommand.STOP_PREVIEW)
+                        peer.assertNoRequest()
+                        assertFalse(stopping.isCompleted)
+                        client.startRecording()
+                        client.takePhoto()
+                        client.refresh()
+                        peer.assertNoRequest()
+                        if (eventBeforeAck) peer.reply(CameraCommand.STOP_PREVIEW)
+                        else peer.send("""{"msg_id":7,"type":"vf_stop"}""")
+                        assertTrue(stopping.await().accepted)
+                        client.awaitState { it.canSendCommand }
+                        assertFalse(client.state.value.awaitingPreviewStop)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun recoveryStopRejectAndMissingEventKeepSessionAndNeverSendStart() = runBlocking {
+        for (reject in listOf(true, false)) {
+            ServerSocket(0).use { server ->
+                CameraClient("127.0.0.1", server.localPort).use { client ->
+                    client.connect()
+                    server.accept().use { peer ->
+                        peer.authenticate(client, 7)
+                        val stopping = async(Dispatchers.Default) { client.stopPreviewAndAwaitVfStop() }
+                        assertEquals(CameraCommand.STOP_PREVIEW, peer.request().messageId)
+                        peer.reply(CameraCommand.STOP_PREVIEW, if (reject) -42 else 0)
+                        val result = withTimeout(7_000) { stopping.await() }
+                        assertFalse(result.accepted)
+                        assertTrue(result.error!!.contains(if (reject) "-42" else "vf_stop"))
+                        assertEquals(ConnectionStatus.CONNECTED, client.state.value.connection)
+                        assertFalse(client.state.value.awaitingPreviewStop)
+                        peer.assertNoRequest()
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun previewCommandsUseCurrentTokenAndEventsNeverCompleteThem() = runBlocking {
         ServerSocket(0).use { server ->
             CameraClient("127.0.0.1", server.localPort).use { client ->

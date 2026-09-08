@@ -10,6 +10,74 @@ import org.junit.Test
 import javax.net.SocketFactory
 
 class CameraPreviewControllerTest {
+    @Test
+    fun explicitRecoveryWaitsForConfirmedStopAndNewStartAck() = runBlocking {
+        val engine = FakePlayback()
+        val confirmed = CompletableDeferred<CameraControlResult>()
+        val newAck = CompletableDeferred<CameraControlResult>()
+        var starts = 0
+        var resets = 0
+        var idle = false
+        val controller = CameraPreviewController(this, engine, { true }, {
+            starts++
+            if (starts == 1) CameraControlResult(false, "rval=-21", CameraErrorCode.PREVIEW_RESTART_CANDIDATE)
+            else newAck.await()
+        }, { CameraControlResult(true) }, { idle }, { resets++; confirmed.await() })
+        try {
+            controller.start(transport)
+            yield()
+            assertTrue(controller.status.value.recoveryAvailable)
+            controller.restart(transport) // Recording/unknown/occupied must not reset the camera.
+            yield()
+            assertEquals(0, resets)
+            idle = true
+            controller.restart(transport)
+            controller.restart(transport) // Double tap cannot queue another recovery.
+            yield()
+            assertEquals(1, resets)
+            assertEquals(1, starts)
+            assertEquals(0, engine.starts)
+            confirmed.complete(CameraControlResult(true))
+            yield()
+            assertEquals(2, starts)
+            assertEquals(0, engine.starts)
+            newAck.complete(CameraControlResult(true))
+            yield()
+            assertEquals(1, engine.starts)
+            assertFalse(controller.status.value.recoveryAvailable)
+        } finally {
+            controller.release()
+        }
+    }
+
+    @Test
+    fun recoveryFailureOrBackgroundNeverStartsPlayerOrLoops() = runBlocking {
+        for (background in listOf(false, true)) {
+            val engine = FakePlayback()
+            val confirm = CompletableDeferred<CameraControlResult>()
+            var starts = 0
+            val controller = CameraPreviewController(this, engine, { true }, {
+                starts++; CameraControlResult(false, "rval=-21", -21)
+            }, { CameraControlResult(true) }, { true }, { confirm.await() })
+            try {
+                controller.start(transport)
+                yield()
+                controller.restart(transport)
+                yield()
+                if (background) controller.stop()
+                confirm.complete(CameraControlResult(false, "Timeout vf_stop"))
+                yield()
+                yield()
+                assertEquals(1, starts)
+                assertEquals(0, engine.starts)
+                assertFalse(controller.status.value.recoveryAvailable)
+                if (!background) assertEquals(PreviewError.STOP_CONTROL, controller.status.value.errorType)
+            } finally {
+                controller.release()
+            }
+        }
+    }
+
     private val transport = PreviewTransport(SocketFactory.getDefault()) { }
     private class FakePlayback : PreviewPlayback {
         val signals = PreviewPlaybackSignals()

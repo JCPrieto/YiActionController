@@ -28,7 +28,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (available?.canSendCommand == true) client.stopPreview()
             else CameraControlResult(false, "No se pudo enviar STOP_PREVIEW: cámara desconectada o ocupada")
-        })
+        },
+        canRestart = { state.value.canSendCommand && state.value.recording == RecordingState.IDLE },
+        stopAndConfirm = { client.stopPreviewAndAwaitVfStop() },
+    )
     val previewState = preview.status
     val player = playback.player
     val cameraNetwork = networks.network
@@ -72,6 +75,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun stopPreview() {
         client.diagnostics.append("UI", "Detener vista previa")
         preview.stop()
+    }
+
+    fun restartPreview() {
+        client.diagnostics.append("UI", "Reiniciar vista previa: un intento 260 + vf_stop + 259")
+        previewNetwork = networks.refresh()
+        preview.restart(previewNetwork?.let { network ->
+            PreviewTransport(network.socketFactory) { socket -> network.bindSocket(socket) }
+        })
     }
 
     fun onBackground() {
