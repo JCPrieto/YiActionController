@@ -1,6 +1,8 @@
 package es.jcprieto.yiactioncontroller
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -18,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.ViewModelProvider
@@ -56,10 +59,12 @@ class MainActivity : ComponentActivity() {
                 val preview by model.previewState.collectAsStateWithLifecycle()
                 val player by model.player.collectAsStateWithLifecycle()
                 val network by model.cameraNetwork.collectAsStateWithLifecycle()
+                val history by model.diagnosticHistory.collectAsStateWithLifecycle()
                 Diagnostics(
                     state, { withNearbyPermission(model::connect) }, model::disconnect, model::refresh,
                     model::takePhoto, model::startRecording, model::stopRecording,
-                    preview, player, network != null, { withNearbyPermission(model::startPreview) }, model::stopPreview
+                    preview, player, network != null, { withNearbyPermission(model::startPreview) }, model::stopPreview,
+                    history, model::clearDiagnosticHistory
                 )
             }
         }
@@ -81,6 +86,8 @@ private fun Diagnostics(
     networkFound: Boolean,
     startPreview: () -> Unit,
     stopPreview: () -> Unit,
+    history: List<String>,
+    clearHistory: () -> Unit,
 ) {
     Scaffold { padding ->
         Column(
@@ -88,6 +95,7 @@ private fun Diagnostics(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("YI · Diagnóstico", style = MaterialTheme.typography.headlineMedium)
+            DiagnosticHistorySection(history, clearHistory)
             Text("Conecta el teléfono manualmente al Wi-Fi de la cámara y después pulsa Conectar.")
             Text("192.168.42.1:7878", style = MaterialTheme.typography.bodySmall)
             val connection = when (state.connection) {
@@ -186,6 +194,34 @@ private fun Diagnostics(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DiagnosticHistorySection(history: List<String>, clear: () -> Unit) {
+    val context = LocalContext.current
+    Text(
+        "Historial de diagnóstico (${history.size}/${DiagnosticHistory.MAX_ENTRIES})",
+        style = MaterialTheme.typography.titleMedium
+    )
+    Text(
+        "Solo en memoria. Sin tokens ni credenciales; incluye rutas de fotos y configuración resumida.",
+        style = MaterialTheme.typography.bodySmall
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(enabled = history.isNotEmpty(), onClick = {
+            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(
+                ClipData.newPlainText("Diagnóstico YI", history.joinToString("\n"))
+            )
+        }) { Text("Copiar historial") }
+        OutlinedButton(enabled = history.isNotEmpty(), onClick = clear) { Text("Limpiar") }
+    }
+    SelectionContainer {
+        Text(
+            if (history.isEmpty()) "Sin entradas" else history.joinToString("\n"),
+            modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp).verticalScroll(rememberScrollState()),
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 

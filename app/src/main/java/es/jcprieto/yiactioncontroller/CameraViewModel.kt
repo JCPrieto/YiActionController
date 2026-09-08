@@ -13,6 +13,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
     private val client = CameraClient()
     val state = client.state
+    val diagnosticHistory = client.diagnostics.entries
+    fun clearDiagnosticHistory() = client.diagnostics.clear()
     private val networks = CameraNetworkProvider(application)
     private val playback = Media3PreviewPlayer(application)
     private var previewNetwork: Network? = null
@@ -33,6 +35,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         viewModelScope.launch {
+            previewState.collect {
+                client.diagnostics.append(
+                    "PREVIEW",
+                    "estado=${it.state} control=${it.control} pendiente=${it.controlPending} error=${it.errorType}"
+                )
+            }
+        }
+        viewModelScope.launch {
             state.collect { if (it.connection == ConnectionStatus.DISCONNECTED) preview.cameraDisconnected() }
         }
         viewModelScope.launch {
@@ -52,18 +62,42 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startPreview() {
+        client.diagnostics.append("UI", "Iniciar vista previa")
         previewNetwork = networks.refresh()
         preview.start(previewNetwork?.let { network ->
             PreviewTransport(network.socketFactory) { socket -> network.bindSocket(socket) }
         })
     }
 
-    fun stopPreview() = preview.stop()
-    fun onBackground() = preview.stop()
-    fun refresh() = client.refresh()
-    fun takePhoto() = client.takePhoto()
-    fun startRecording() = client.startRecording()
-    fun stopRecording() = client.stopRecording()
+    fun stopPreview() {
+        client.diagnostics.append("UI", "Detener vista previa")
+        preview.stop()
+    }
+
+    fun onBackground() {
+        client.diagnostics.append("APP", "Segundo plano: detener preview")
+        preview.stop()
+    }
+
+    fun refresh() {
+        client.diagnostics.append("UI", "Consultar batería y configuración")
+        client.refresh()
+    }
+
+    fun takePhoto() {
+        client.diagnostics.append("UI", "Hacer foto")
+        client.takePhoto()
+    }
+
+    fun startRecording() {
+        client.diagnostics.append("UI", "Iniciar grabación")
+        client.startRecording()
+    }
+
+    fun stopRecording() {
+        client.diagnostics.append("UI", "Detener grabación")
+        client.stopRecording()
+    }
     override fun onCleared() {
         preview.release()
         networks.close()

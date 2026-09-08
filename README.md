@@ -182,6 +182,35 @@ alineado con Kotlin 2.2.10 incluido por el AGP del proyecto.
 
 ## Hito 3 · Vista previa RTSP
 
+### Historial de diagnóstico en memoria
+
+La cabecera de la pantalla incluye un historial visible, seleccionable y con
+botones **Copiar historial** y **Limpiar**. Conserva las últimas 200 entradas (detalle limitado a 1200 caracteres por
+entrada), en orden, con número de
+secuencia y fecha/hora con zona. Al llenarse descarta las entradas más antiguas.
+Registra TX tras escribir el comando, RX, todos los eventos `msg_id=7`, timeouts,
+conexiones y estados del preview. RX/eventos se capturan en el lector existente,
+antes de actualizar el estado; no dependen de que la UI observe cada mensaje.
+
+No almacena tokens (tampoco el `param` del login), SSID, contraseña Wi-Fi ni
+número de serie. La configuración se resume a los campos de estado, modos,
+tarjeta, resolución y versiones. De los eventos se conserva tipo y solo los
+parámetros permitidos de diagnóstico, incluida la ruta de `photo_taken`;
+los parámetros desconocidos se omiten. No es una captura íntegra del protocolo.
+El portapapeles recibe únicamente este historial resumido al pulsar Copiar,
+no los campos de diagnóstico antiguo que muestran la configuración completa.
+
+Sobrevive a rotación y reconexión dentro del mismo ViewModel, no a muerte del
+proceso. No se guarda en archivos, base de datos ni Logcat. Limpiar borra solo
+el historial de la app, no una copia ya realizada al portapapeles. No añade
+comandos, polling, reintentos ni una interpretación del rechazo `259/-21`.
+
+Para la próxima prueba: pulsar **Limpiar**, reproducir la secuencia
+preview → detener → foto → grabar → detener → preview. Si aparece el rechazo,
+consultar configuración y pulsar **Copiar historial** antes de cerrar la app.
+Compartir ese texto, indicando si los datos móviles estaban activos.
+El historial y su copia en el teléfono quedan pendientes de validación física.
+
 El usuario ha confirmado los Hitos 1 y 2 completos y validados físicamente,
 incluida la corrección de los estados de grabación descrita anteriormente.
 La vista previa está implementada, pero **pendiente de reproducción física

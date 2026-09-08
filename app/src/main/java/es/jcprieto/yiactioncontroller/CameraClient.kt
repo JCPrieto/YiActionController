@@ -21,6 +21,7 @@ class CameraClient(
     private val port: Int = 7878,
     private val responseTimeoutMillis: Long = 5_000,
     private val socketFactory: SocketFactory = SocketFactory.getDefault(),
+    val diagnostics: DiagnosticHistory = DiagnosticHistory(),
 ) : AutoCloseable {
     private class Session(val factory: SocketFactory) {
         var socket: Socket? = null
@@ -42,6 +43,7 @@ class CameraClient(
         if (session != null) return@synchronized
         val current = Session(factory)
         session = current
+        diagnostics.append("TCP", "Nueva conexión")
         mutableState.value = CameraState(connection = ConnectionStatus.CONNECTING)
         current.job = scope.launch { runSession(current) }
     }
@@ -99,6 +101,7 @@ class CameraClient(
 
     fun disconnect() = synchronized(lock) {
         val previous = session
+        if (previous != null) diagnostics.append("TCP", "Desconexión solicitada")
         session = null // An old worker must never overwrite a new session's state.
         previous?.commands?.close()
         previous?.job?.cancel()
@@ -162,6 +165,7 @@ class CameraClient(
                 }
                 output.write(raw.toByteArray(Charsets.UTF_8))
                 output.flush()
+                update(current) { diagnostics.sent(id); it }
                 pending[id] = System.nanoTime()
                 publishPending()
             }
@@ -186,7 +190,10 @@ class CameraClient(
                 val expired = pending.entries.firstOrNull {
                     (System.nanoTime() - it.value) / 1_000_000 >= responseTimeoutMillis
                 }
-                if (expired != null) throw SocketTimeoutException("Sin respuesta al comando ${expired.key}")
+                if (expired != null) {
+                    update(current) { diagnostics.append("TIMEOUT", "msg_id=${expired.key}"); it }
+                    throw SocketTimeoutException("Sin respuesta al comando ${expired.key}")
+                }
                 val count = try {
                     input.read(bytes)
                 } catch (_: SocketTimeoutException) {
@@ -204,6 +211,7 @@ class CameraClient(
                     ).toString()
                     update(current) { it.copy(lastMessage = raw) }
                     val message = cameraJson.decodeFromString<CameraMessage>(raw)
+                    update(current) { diagnostics.received(message); it }
                     val completesRequest = message.messageId != EVENT && message.rval != null &&
                             message.messageId in pending
                     if (message.messageId == LOGIN && LOGIN in pending) {
@@ -266,6 +274,10 @@ class CameraClient(
             synchronized(lock) {
                 current.previewResult?.second?.complete(CameraControlResult(false, failure ?: "Cámara desconectada"))
                 if (session === current) {
+                    diagnostics.append(
+                        "TCP",
+                        if (failure == null) "Sesión terminada" else "Sesión terminada con error; consultar diagnóstico TCP"
+                    )
                     session = null
                     val previous = mutableState.value
                     mutableState.value = CameraState(

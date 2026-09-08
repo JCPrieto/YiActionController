@@ -40,8 +40,15 @@ class CameraActionsTest {
                         val state = client.awaitState { it.canSendCommand }
                         assertEquals(ConnectionStatus.CONNECTED, state.connection)
                         assertTrue(state.error!!.contains("-42"))
+                        val history = client.diagnostics.entries.value
+                        val startTx = history.indexOfFirst { it.contains("[TX] msg_id=259") }
+                        val eventRx = history.indexOfFirst { it.contains("[EVENT]") && it.contains("vf_start") }
+                        val startRx = history.indexOfFirst { it.contains("[RX]") && it.contains("\"msg_id\":259") }
+                        assertTrue(startTx >= 0 && eventRx > startTx && startRx > eventRx)
+                        assertTrue(history.last().contains("\"rval\":-42"))
                     }
                     client.disconnect()
+                    assertTrue(client.diagnostics.entries.value.any { it.contains("\"rval\":-42") })
                 }
             }
         }
