@@ -372,7 +372,7 @@ La simultaneidad real depende del firmware y queda pendiente de validación.
   limpieza ante error, release idempotente y durante apertura, datagramas grandes
   y lecturas parciales, timeout y desbloqueo del receptor al cerrar. El binding
   Android real se sustituye por un callback en JVM: requiere prueba física.
-- **Implementado, pendiente de validar físicamente:** recuperación explícita
+- **Implementado y validado físicamente:** recuperación explícita
   de 259/-21, datos móviles simultáneos, rotación con imagen,
   segundo plano, grabación con preview y `RESTRICT_LOCAL_NETWORK`.
 
