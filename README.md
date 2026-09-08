@@ -252,7 +252,7 @@ aceptada seguida de `vf_stop`, foto completada seguida de `vf_start`, grabación
 completada (`video_record_complete`) seguida de otro `vf_start`, y rechazo
 259/-21 al intentar iniciar de nuevo. Esto sugiere un conflicto de estado del
 visor, pero **no confirma el significado general de -21**. La nueva secuencia
-de recuperación está cubierta por tests y pendiente de validar en la cámara.
+de recuperación está cubierta por tests y validada en la cámara.
 No considera el rechazo como éxito ni abre RTSP basándose solo en
 `preview_status=on`.
 
