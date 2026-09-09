@@ -21,6 +21,26 @@ class DiagnosticHistory(private val timestamp: () -> String = { OffsetDateTime.n
 
     internal fun sent(id: Int) = append("TX", "msg_id=$id (token omitido)")
 
+    internal fun tcpFailure(exception: Exception) {
+        val kind = when (exception) {
+            is java.io.EOFException -> "EOF"
+            is java.net.SocketTimeoutException -> "TIMEOUT"
+            is java.net.SocketException -> "SOCKET"
+            is kotlinx.serialization.SerializationException -> "JSON"
+            is java.io.IOException -> "IO"
+            else -> "PROTOCOL_OR_INTERNAL"
+        }
+        // Only known errno identifiers; exception messages may contain camera data.
+        val knownErrnos = setOf(
+            "ECONNABORTED", "ECONNRESET", "ETIMEDOUT", "EHOSTUNREACH",
+            "ENETUNREACH", "ENETDOWN", "EPERM", "EACCES", "EPIPE", "EBADF"
+        )
+        val codes = generateSequence<Throwable>(exception) { it.cause }.take(8)
+            .flatMap { Regex("\\bE[A-Z]+\\b").findAll(it.message.orEmpty()).map { match -> match.value } }
+            .filter { it in knownErrnos }.distinct().toList()
+        append("TCP", "Fallo: tipo=$kind errno=${codes.joinToString().ifEmpty { "no disponible" }}")
+    }
+
     internal fun received(message: CameraMessage) {
         val summary = buildJsonObject {
             put("msg_id", message.messageId)

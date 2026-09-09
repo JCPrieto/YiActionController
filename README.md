@@ -376,16 +376,16 @@ La simultaneidad durante inicio/parada de grabación está validada físicamente
   de 259/-21, rotación con imagen, preview durante inicio/parada de grabación,
   background que detiene preview y exige reinicio manual, y liberación con
   `CAMERA_DISCONNECTED` al desconectar la cámara.
-- **Pendiente de prueba física del Hito 4:** solicitud local-only, Internet móvil
-  simultáneo y repetición de los escenarios con `RESTRICT_LOCAL_NETWORK`.
+- **Pruebas físicas del Hito 4:** resultados del 09/09/2026 más abajo. Internet
+  simultáneo funciona; persiste una incidencia TCP al abrir otra app.
 
 Prueba física propuesta: conectar con datos móviles activos; iniciar preview;
 confirmar imagen/En directo; rotar; iniciar/detener grabación con preview;
 detener/reiniciar preview; salir a Home y volver (sin autoarranque); apagar el
 Wi-Fi o la cámara; reconectar y reintentar. Repetir con protección local activa.
 
-Limitaciones: UDP sin fallback automático a RTP/TCP; routing
-simultáneo con datos móviles aún pendiente de validar en la cámara. Sin
+Limitaciones: UDP sin fallback automático a RTP/TCP; conservación de TCP al
+abrir otra app pendiente de resolver. Sin
 reconexión automática, pantalla completa,
 galería, listado/descarga/reproducción de archivos, cambios de resolución,
 configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 5.
@@ -398,7 +398,42 @@ Verificación final:
 
 ## Hito 4 — conexión local-only
 
-### Implementado / pendiente de prueba física
+### Validación física e incidencia abierta — 09/09/2026
+
+Resultados comunicados por el usuario con la cámara de referencia:
+
+| Prueba                            | Resultado                                                                              |
+|-----------------------------------|----------------------------------------------------------------------------------------|
+| A — Conexión desde app            | Superada                                                                               |
+| B — Internet simultáneo           | Internet funciona al abrir otra web/app; al volver, TCP de la cámara está desconectado |
+| C — Preview, rotación y grabación | Superada                                                                               |
+| D — Background                    | Home y volver supera la prueba; abrir el navegador provoca cierre TCP                  |
+| E — Desconexión física            | Superada                                                                               |
+| F — Reconexión                    | Superada                                                                               |
+| G — RESTRICT_LOCAL_NETWORK        | Superada                                                                               |
+
+El historial confirma `260/rval=0`, preview `IDLE` y `vf_stop` antes del fallo TCP;
+después la app emite `CAMERA_CONNECTION` y libera la callback como limpieza. No
+aparece `onLost` previo en el fragmento aportado. Seguir asociado al AP no implica
+que la sesión TCP o la solicitud de la app sigan activas.
+
+Hipótesis pendiente de confirmar: Android puede cerrar los sockets TCP cuando
+congela los procesos de una app en caché, aunque la asociación Wi-Fi permanezca
+([Cached apps freezer, AOSP](https://source.android.com/docs/core/perf/cached-apps-freezer)).
+La diferencia entre Home y abrir otra app es compatible con esa política, pero
+este historial no demuestra que sea la causa en el teléfono probado.
+
+Se corrige una pérdida de evidencia: la limpieza Wi-Fi ya no vuelve a llamar
+`client.disconnect()` cuando TCP está cerrado, por lo que conserva su error en
+el diagnóstico de sesión. El historial añade tipo de fallo (`EOF`, `SOCKET`, etc.)
+y errno conocidos, sin copiar mensajes de excepción ni credenciales. También
+registra vuelta a foreground y `onBlockedStatusChanged`. Repetir B/D y copiar el
+historial para distinguir cierre remoto, error de socket y restricciones de red.
+No se añade reconexión automática, keepalive de protocolo ni foreground service.
+Verificación de esta revisión: 60 tests pasando, APK debug generado y lint con
+0 errores y 17 advertencias. La causa física del cierre TCP sigue pendiente de confirmar.
+
+### Implementación
 
 La conexión manual a la YI dejó al teléfono de prueba sin Internet efectivo aun
 con datos móviles activos. El flujo principal desde API 29 solicita una conexión
@@ -418,7 +453,8 @@ La misma Network proporciona `socketFactory` para control TCP y RTSP. El transpo
 UDP validado del Hito 3 usa `network.bindSocket` para RTP y RTCP. No se modifica el
 routing global ni se usa `bindProcessToNetwork`/`setProcessDefaultNetwork`.
 Internet queda en la red predeterminada que elija Android. La coexistencia YI +
-4G/5G depende del dispositivo/sistema y **todavía no se afirma validada**. No se
+4G/5G depende del dispositivo/sistema y **está validada en el teléfono de referencia**;
+la continuidad de la sesión TCP al abrir otra app sigue pendiente. No se
 activa Wi-Fi ni datos móviles desde la app; la concurrencia entre dos Wi-Fi no se
 usa como requisito para permitir Wi-Fi más datos móviles.
 
@@ -508,7 +544,7 @@ posterior no sustituya `NETWORK_LOST`. Se conserva la regresión Hitos 1–3.
 Las callbacks Android, el diálogo de consentimiento, la retención real en rotación
 y el routing físico no se simulan como si fueran pruebas del sistema.
 
-### Plan de pruebas físicas pendiente
+### Plan de pruebas físicas y repetición de B/D
 
 **A — Conexión desde app.** Olvidar/desconectar manualmente la Wi-Fi YI en Android;
 activar datos móviles; encender Wi-Fi de la cámara; abrir la app; introducir SSID

@@ -61,6 +61,11 @@ class MainActivity : ComponentActivity() {
         if (!isChangingConfigurations) model.onBackground()
         super.onStop()
     }
+
+    override fun onStart() {
+        super.onStart()
+        model.onForeground()
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

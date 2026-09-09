@@ -5,6 +5,21 @@ import org.junit.Test
 
 class DiagnosticHistoryTest {
     @Test
+    fun tcpFailureDistinguishesEofAndSocketErrnoWithoutExceptionContents() {
+        val history = DiagnosticHistory { "now" }
+        history.tcpFailure(java.io.EOFException("synthetic-private"))
+        val socket = java.net.SocketException("synthetic-private")
+        socket.initCause(java.io.IOException("read failed: ECONNABORTED synthetic-private"))
+        history.tcpFailure(socket)
+        history.tcpFailure(kotlinx.serialization.SerializationException("synthetic-private"))
+        val entries = history.entries.value
+        assertTrue(entries[0].contains("tipo=EOF"))
+        assertTrue(entries[1].contains("tipo=SOCKET errno=ECONNABORTED"))
+        assertTrue(entries[2].contains("tipo=JSON"))
+        assertFalse(entries.joinToString().contains("synthetic-private"))
+    }
+
+    @Test
     fun boundedOrderedTimestampedAndClearable() {
         val history = DiagnosticHistory { "2026-09-08T12:00:00+02:00" }
         repeat(205) { history.sent(it) }

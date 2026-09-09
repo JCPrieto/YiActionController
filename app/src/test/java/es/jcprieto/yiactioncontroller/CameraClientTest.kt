@@ -104,6 +104,7 @@ class CameraClientTest {
                 val state = client.awaitState { it.error != null }
                 assertNull(state.token)
                 assertEquals(ConnectionStatus.DISCONNECTED, state.connection)
+                assertTrue(client.diagnostics.entries.value.any { it.contains("tipo=EOF") })
             }
         }
     }

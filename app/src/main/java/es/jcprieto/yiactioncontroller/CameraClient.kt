@@ -316,6 +316,7 @@ class CameraClient(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (exception: Exception) {
+            update(current) { diagnostics.tcpFailure(exception); it }
             // Serialization errors can embed the full incoming JSON, including Wi-Fi credentials.
             failure = if (exception is kotlinx.serialization.SerializationException) "Respuesta JSON no válida"
             else exception.message ?: exception.javaClass.simpleName

@@ -71,6 +71,9 @@ internal class CameraWifiConnectionManager(
 
                 override fun onLost(network: Network) = request.lost(id, network)
                 override fun onUnavailable() = request.unavailable(id)
+                override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+                    if (callbackId == id) diagnostic("Acceso a Network bloqueado=$blocked")
+                }
             }
             callback = observer; callbackId = id
             // Also covers onAvailable followed by missing route/capabilities.

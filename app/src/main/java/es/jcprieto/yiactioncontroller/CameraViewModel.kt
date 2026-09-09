@@ -118,7 +118,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         else preview.cameraDisconnected()
         binding = null
         previewNetwork = null
-        client.disconnect()
+        // A TCP failure already closed the session. Do not erase its diagnostic error during Wi-Fi cleanup.
+        if (state.value.connection != ConnectionStatus.DISCONNECTED) client.disconnect()
     }
 
     fun disconnect() {
@@ -157,6 +158,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun onBackground() {
         client.diagnostics.append("APP", "Segundo plano: detener preview")
         preview.stop()
+    }
+
+    fun onForeground() {
+        client.diagnostics.append("APP", "Primer plano: Wi-Fi=${wifiStatus.value.state} TCP=${state.value.connection}")
     }
 
     fun refresh() {
