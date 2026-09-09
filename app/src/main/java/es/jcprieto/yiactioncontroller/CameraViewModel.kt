@@ -2,9 +2,12 @@ package es.jcprieto.yiactioncontroller
 
 import android.app.Application
 import android.net.Network
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.util.UnstableApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -15,7 +18,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val state = client.state
     val diagnosticHistory = client.diagnostics.entries
     fun clearDiagnosticHistory() = client.diagnostics.clear()
-    private val networks = CameraNetworkProvider(application)
+    private val networks = if (Build.VERSION.SDK_INT < 29) CameraNetworkProvider(application) else null
+    private var binding: CameraNetworkBinding<Network>? = null
+    private var pendingSsid: String? = null
+    private var pendingPassword: String? = null
+    private val mutablePermissionPending = MutableStateFlow(false)
+    val permissionPending = mutablePermissionPending.asStateFlow()
     private val playback = Media3PreviewPlayer(application)
     private var previewNetwork: Network? = null
     private val preview = CameraPreviewController(
@@ -34,7 +42,20 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     )
     val previewState = preview.status
     val player = playback.player
-    val cameraNetwork = networks.network
+    private val wifi = if (Build.VERSION.SDK_INT >= 29) CameraWifiConnectionManager(
+        application,
+        ready = { network ->
+            val selected = CameraNetworkBinding(network, network.socketFactory) { network.bindSocket(it) }
+            binding = selected
+            client.connect(selected.socketFactory)
+        },
+        lost = { networkInvalidated() },
+        diagnostic = { client.diagnostics.append("WIFI", it) },
+    ) else null
+    val wifiStatus = if (Build.VERSION.SDK_INT >= 29) wifi!!.status
+    else MutableStateFlow(CameraWifiStatus<Network>()).asStateFlow()
+    private val mutableCameraNetwork = MutableStateFlow<Network?>(null)
+    val cameraNetwork = mutableCameraNetwork.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -46,30 +67,73 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         viewModelScope.launch {
-            state.collect { if (it.connection == ConnectionStatus.DISCONNECTED) preview.cameraDisconnected() }
+            state.collect {
+                if (it.connection == ConnectionStatus.DISCONNECTED) {
+                    preview.cameraDisconnected()
+                    if (Build.VERSION.SDK_INT >= 29 && binding != null) {
+                        binding = null
+                        wifi?.fail(CameraWifiError.CAMERA_CONNECTION)
+                    }
+                }
+            }
         }
         viewModelScope.launch {
-            networks.network.collect { if (previewNetwork != null && it != previewNetwork) preview.networkLost() }
+            if (Build.VERSION.SDK_INT >= 29) wifiStatus.collect { mutableCameraNetwork.value = it.network }
+            else networks?.network?.collect {
+                mutableCameraNetwork.value = it
+                if (previewNetwork != null && it != previewNetwork) preview.networkLost()
+            }
         }
     }
 
-    fun connect() {
-        val factory = networks.refresh()?.socketFactory
+    fun connectManual() {
+        if (Build.VERSION.SDK_INT >= 29) return
+        val factory = networks?.refresh()?.socketFactory
         if (factory == null) client.connect() else client.connect(factory)
+    }
+
+    // Kept outside saved state/StateFlow; survives a permission-dialog rotation only in memory.
+    fun prepareConnection(ssid: String, password: String): Boolean {
+        if (mutablePermissionPending.value || wifiStatus.value.state in setOf(
+                CameraWifiState.REQUESTING, CameraWifiState.CONNECTING, CameraWifiState.CONNECTED
+            )
+        ) return false
+        pendingSsid = ssid
+        pendingPassword = password
+        mutablePermissionPending.value = true
+        return true
+    }
+
+    fun permissionResult(granted: Boolean) {
+        val ssid = pendingSsid
+        val password = pendingPassword
+        pendingSsid = null; pendingPassword = null
+        mutablePermissionPending.value = false
+        if (ssid == null || password == null || Build.VERSION.SDK_INT < 29) return
+        if (granted) wifi?.connect(ssid, password) else wifi?.fail(CameraWifiError.PERMISSION_DENIED)
+    }
+
+    private fun networkInvalidated() {
+        if (wifiStatus.value.error == CameraWifiError.NETWORK_LOST) preview.networkLost()
+        else preview.cameraDisconnected()
+        binding = null
+        previewNetwork = null
+        client.disconnect()
     }
 
     fun disconnect() {
         preview.cameraDisconnected()
         previewNetwork = null
+        binding = null
         client.disconnect()
+        pendingSsid = null; pendingPassword = null
+        mutablePermissionPending.value = false
+        if (Build.VERSION.SDK_INT >= 29) wifi?.close()
     }
 
     fun startPreview() {
         client.diagnostics.append("UI", "Iniciar vista previa")
-        previewNetwork = networks.refresh()
-        preview.start(previewNetwork?.let { network ->
-            PreviewTransport(network.socketFactory) { socket -> network.bindSocket(socket) }
-        })
+        preview.start(previewTransport())
     }
 
     fun stopPreview() {
@@ -79,10 +143,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun restartPreview() {
         client.diagnostics.append("UI", "Reiniciar vista previa: un intento 260 + vf_stop + 259")
-        previewNetwork = networks.refresh()
-        preview.restart(previewNetwork?.let { network ->
+        preview.restart(previewTransport())
+    }
+
+    private fun previewTransport(): PreviewTransport? {
+        if (Build.VERSION.SDK_INT >= 29) return binding?.previewTransport
+        previewNetwork = networks?.refresh()
+        return previewNetwork?.let { network ->
             PreviewTransport(network.socketFactory) { socket -> network.bindSocket(socket) }
-        })
+        }
     }
 
     fun onBackground() {
@@ -111,7 +180,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
     override fun onCleared() {
         preview.release()
-        networks.close()
+        binding = null
         client.close()
+        pendingSsid = null; pendingPassword = null
+        if (Build.VERSION.SDK_INT >= 29) wifi?.close()
+        networks?.close()
     }
 }

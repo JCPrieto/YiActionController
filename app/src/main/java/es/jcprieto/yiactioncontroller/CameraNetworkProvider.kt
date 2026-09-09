@@ -2,15 +2,12 @@ package es.jcprieto.yiactioncontroller
 
 import android.content.Context
 import android.net.*
-import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.net.InetAddress
 import javax.net.SocketFactory
 
 class CameraNetworkProvider(context: Context) : AutoCloseable {
     private val manager = context.getSystemService(ConnectivityManager::class.java)
-    private val cameraAddress = InetAddress.getByAddress(byteArrayOf(192.toByte(), 168.toByte(), 42, 1))
     private val mutableNetwork = MutableStateFlow<Network?>(null)
     val network = mutableNetwork.asStateFlow()
     val socketFactory: SocketFactory? get() = network.value?.socketFactory
@@ -52,12 +49,7 @@ class CameraNetworkProvider(context: Context) : AutoCloseable {
         val candidates = manager.allNetworks.filter { it != excluding }.mapNotNull { network ->
             val caps = manager.getNetworkCapabilities(network) ?: return@mapNotNull null
             val links = manager.getLinkProperties(network) ?: return@mapNotNull null
-            val prefix = links.routes.filter {
-                (Build.VERSION.SDK_INT < 33 || it.type == RouteInfo.RTN_UNICAST) && it.destination.contains(
-                    cameraAddress
-                ) &&
-                        it.destination.prefixLength > 0
-            }.maxOfOrNull { it.destination.prefixLength }
+            val prefix = cameraRoutePrefix(links)
             CameraNetworkCandidate(
                 network,
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN),

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
+import android.net.Network
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -13,14 +14,16 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.ViewModelProvider
@@ -32,18 +35,26 @@ import androidx.media3.ui.PlayerView
 @UnstableApi
 class MainActivity : ComponentActivity() {
     private val model by lazy { ViewModelProvider(this)[CameraViewModel::class.java] }
-    private var permissionAction: (() -> Unit)? = null
-    private val nearbyPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        // SDK 36 without experimental protection can still use the LAN if permission is denied.
-        permissionAction?.invoke()
-        permissionAction = null
+    private val nearbyPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        model.permissionResult(hasWifiPermission())
     }
 
-    private fun withNearbyPermission(action: () -> Unit) {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED) {
-            permissionAction = action
-            nearbyPermission.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
-        } else action()
+    private fun hasWifiPermission(): Boolean = checkSelfPermission(
+        if (Build.VERSION.SDK_INT >= 33) Manifest.permission.NEARBY_WIFI_DEVICES
+        else Manifest.permission.ACCESS_FINE_LOCATION
+    ) == PackageManager.PERMISSION_GRANTED
+
+    private fun connectCamera(ssid: String, password: String) {
+        if (Build.VERSION.SDK_INT < 29) {
+            model.connectManual(); return
+        }
+        if (!model.prepareConnection(ssid, password)) return
+        if (hasWifiPermission()) model.permissionResult(true)
+        else nearbyPermission.launch(
+            if (Build.VERSION.SDK_INT >= 33)
+                arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+            else arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
+        )
     }
 
     override fun onStop() {
@@ -60,11 +71,13 @@ class MainActivity : ComponentActivity() {
                 val player by model.player.collectAsStateWithLifecycle()
                 val network by model.cameraNetwork.collectAsStateWithLifecycle()
                 val history by model.diagnosticHistory.collectAsStateWithLifecycle()
+                val wifi by model.wifiStatus.collectAsStateWithLifecycle()
+                val permissionPending by model.permissionPending.collectAsStateWithLifecycle()
                 Diagnostics(
-                    state, { withNearbyPermission(model::connect) }, model::disconnect, model::refresh,
+                    state, ::connectCamera, model::disconnect, model::refresh,
                     model::takePhoto, model::startRecording, model::stopRecording,
-                    preview, player, network != null, { withNearbyPermission(model::startPreview) }, model::stopPreview,
-                    history, model::clearDiagnosticHistory, model::restartPreview
+                    preview, player, network != null, model::startPreview, model::stopPreview,
+                    history, model::clearDiagnosticHistory, model::restartPreview, wifi, permissionPending
                 )
             }
         }
@@ -75,7 +88,7 @@ class MainActivity : ComponentActivity() {
 @UnstableApi
 private fun Diagnostics(
     state: CameraState,
-    connect: () -> Unit,
+    connect: (String, String) -> Unit,
     disconnect: () -> Unit,
     refresh: () -> Unit,
     takePhoto: () -> Unit,
@@ -89,15 +102,50 @@ private fun Diagnostics(
     history: List<String>,
     clearHistory: () -> Unit,
     restartPreview: () -> Unit,
+    wifi: CameraWifiStatus<Network>,
+    permissionPending: Boolean,
 ) {
+    // Deliberately not rememberSaveable: credentials never enter saved instance state.
+    var ssid by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    val automaticWifi = Build.VERSION.SDK_INT >= 29
+    val wifiActive = permissionPending || wifi.state in setOf(
+        CameraWifiState.REQUESTING, CameraWifiState.CONNECTING, CameraWifiState.CONNECTED
+    )
     Scaffold { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("YI · Diagnóstico", style = MaterialTheme.typography.headlineMedium)
-            DiagnosticHistorySection(history, clearHistory)
-            Text("Conecta el teléfono manualmente al Wi-Fi de la cámara y después pulsa Conectar.")
+            Text("Cámara YI", style = MaterialTheme.typography.headlineMedium)
+            if (automaticWifi) {
+                if (!wifiActive) {
+                    OutlinedTextField(
+                        ssid, { ssid = it }, label = { Text("SSID") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        password, { password = it }, label = { Text("Contraseña") }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text("Credenciales solo en memoria. La contraseña se borra del formulario al conectar.")
+                }
+                Text(
+                    "Wi-Fi local: " + if (permissionPending) "Esperando permiso" else when (wifi.state) {
+                        CameraWifiState.DISCONNECTED -> "Desconectada"
+                        CameraWifiState.REQUESTING -> "Solicitando conexión; Android puede pedir autorización"
+                        CameraWifiState.CONNECTING -> "Comprobando ruta a la cámara"
+                        CameraWifiState.CONNECTED -> "Conectada"
+                        CameraWifiState.UNAVAILABLE -> "No disponible"
+                        CameraWifiState.LOST -> "Conexión perdida"
+                        CameraWifiState.ERROR -> "Error"
+                    }
+                )
+                Text("Internet de la YI: no requerido")
+                wifi.error?.let { Text(it.description, color = MaterialTheme.colorScheme.error) }
+            } else Text("Android 8/9: conecta el teléfono manualmente al Wi-Fi de la cámara desde Ajustes y después pulsa Conectar a cámara.")
             Text("192.168.42.1:7878", style = MaterialTheme.typography.bodySmall)
             val connection = when (state.connection) {
                 ConnectionStatus.DISCONNECTED -> "Desconectada"
@@ -105,12 +153,21 @@ private fun Diagnostics(
                 ConnectionStatus.AUTHENTICATING -> "Obteniendo token…"
                 ConnectionStatus.CONNECTED -> "Conectada"
             }
-            Text(connection, style = MaterialTheme.typography.titleLarge)
-            if (state.connection == ConnectionStatus.DISCONNECTED) {
-                Button(onClick = connect) { Text("Conectar") }
+            Text("Sesión cámara: $connection", style = MaterialTheme.typography.titleLarge)
+            if (state.connection == ConnectionStatus.DISCONNECTED && !wifiActive) {
+                Button(
+                    onClick = {
+                        val inputSsid = ssid
+                        val inputPassword = password
+                        ssid = ""; password = ""
+                        connect(inputSsid, inputPassword)
+                    },
+                    enabled = !automaticWifi || (ssid.isNotBlank() && password.isNotEmpty())
+                ) { Text("Conectar a cámara") }
             } else {
                 OutlinedButton(onClick = disconnect) { Text("Desconectar") }
             }
+            DiagnosticHistorySection(history, clearHistory)
             Button(
                 onClick = refresh,
                 enabled = state.canSendCommand,

@@ -160,10 +160,11 @@ class CameraPreviewController(
     }
 
     fun networkLost() {
-        if (wanted || engineActive || cameraMayStream) stop(
-            PreviewError.NETWORK_LOST,
-            "Se perdió la Wi-Fi de la cámara"
-        )
+        if (!wanted && !engineActive && !cameraMayStream && cleanup?.isActive != true) return
+        // The transport is gone: no STOP can be delivered, and TCP EOF must not replace this cause.
+        releaseWork()
+        mutableStatus.value =
+            PreviewStatus(PreviewState.ERROR, "Se perdió la Wi-Fi de la cámara", PreviewError.NETWORK_LOST)
     }
 
     private fun releaseWork() {

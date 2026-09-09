@@ -251,7 +251,7 @@ class CameraClient(
                     val raw = Charsets.UTF_8.newDecoder().decode(
                         ByteBuffer.wrap(frame.toByteArray(Charsets.ISO_8859_1)),
                     ).toString()
-                    update(current) { it.copy(lastMessage = raw) }
+                    update(current) { it.copy(lastMessage = redactCameraJson(raw)) }
                     val message = cameraJson.decodeFromString<CameraMessage>(raw)
                     update(current) { diagnostics.received(message); it }
                     synchronized(lock) {
@@ -316,7 +316,9 @@ class CameraClient(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (exception: Exception) {
-            failure = exception.message ?: exception.javaClass.simpleName
+            // Serialization errors can embed the full incoming JSON, including Wi-Fi credentials.
+            failure = if (exception is kotlinx.serialization.SerializationException) "Respuesta JSON no válida"
+            else exception.message ?: exception.javaClass.simpleName
         } finally {
             runCatching { current.socket?.close() }
             current.commands.close()

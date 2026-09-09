@@ -172,7 +172,10 @@ class CameraPreviewControllerTest {
                 assertTrue(engine.allocated)
                 when (cause) {
                     PreviewError.CAMERA_DISCONNECTED -> controller.cameraDisconnected()
-                    PreviewError.NETWORK_LOST -> controller.networkLost()
+                    PreviewError.NETWORK_LOST -> {
+                        controller.networkLost()
+                        controller.cameraDisconnected() // Subsequent TCP EOF preserves the network cause.
+                    }
                     else -> engine.signals.error(cause, "simulated")
                 }
                 withTimeout(2_000) { controller.status.first { it.state == PreviewState.ERROR && !it.controlPending } }

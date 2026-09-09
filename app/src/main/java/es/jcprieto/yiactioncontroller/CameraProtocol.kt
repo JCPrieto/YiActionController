@@ -66,7 +66,8 @@ data class CameraState(
 }
 
 internal fun CameraState.applyMessage(message: CameraMessage, raw: String): CameraState {
-    var next = copy(lastMessage = raw)
+    val safeRaw = redactCameraJson(raw)
+    var next = copy(lastMessage = safeRaw)
     if (message.rval != null && message.rval != 0) {
         return next.copy(error = "Comando ${message.messageId}: rval=${message.rval}")
     }
@@ -77,7 +78,7 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
         next = next.copy(battery = value, error = if (value == null) "Batería no válida" else next.error)
     }
     if (message.messageId == GET_CONFIG && message.rval == 0) {
-        val values = message.param as? JsonArray
+        val values = message.param?.let(::redactCameraElement) as? JsonArray
             ?: error("La configuración no contiene un array en param")
         val configuration = buildMap {
             for (item in values) {
@@ -92,25 +93,26 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
             }
         }
         next = next.copy(
-            configuration = configuration,
+            configuration = configuration.mapValues { (key, value) -> if (sensitiveCameraKey(key)) "[omitido]" else value },
             events = next.events - configuration.keys,
             recording = recordingFromAppStatus(configuration["app_status"]),
         )
     }
     if (message.messageId == EVENT) {
-        val eventValue = message.param.text() ?: message.param?.toString()
+        val eventValue = if (message.type?.let(::sensitiveCameraKey) == true) "[omitido]"
+        else message.param.text() ?: message.param?.let(::redactCameraElement)?.toString()
         next = next.copy(
-            lastEvent = raw,
+            lastEvent = safeRaw,
             events = if (message.type != null && eventValue != null)
                 next.events + (message.type to eventValue) else next.events,
         )
         next = when (message.type) {
-            "app_status" -> next.withRecordingEvent(recordingFromAppStatus(message.param.text()), raw)
-            "start_video_record" -> next.withRecordingEvent(RecordingState.RECORDING, raw)
+            "app_status" -> next.withRecordingEvent(recordingFromAppStatus(message.param.text()), safeRaw)
+            "start_video_record" -> next.withRecordingEvent(RecordingState.RECORDING, safeRaw)
                 .copy(recordingStopRequested = false)
             // Observed after stopping on the reference firmware (return to viewfinder).
             "vf_start" -> if (previewControlRequested && recording == RecordingState.RECORDING && !recordingStopRequested)
-                next else next.withRecordingEvent(RecordingState.IDLE, raw).copy(recordingStopRequested = false)
+                next else next.withRecordingEvent(RecordingState.IDLE, safeRaw).copy(recordingStopRequested = false)
             "start_photo_capture" -> next.copy(lastPhotoEvent = PhotoEvent.START_PHOTO_CAPTURE)
             "precise_capture_data_ready" -> next.copy(lastPhotoEvent = PhotoEvent.PRECISE_CAPTURE_DATA_READY)
             "photo_taken" -> next.copy(

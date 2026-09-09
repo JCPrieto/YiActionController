@@ -1,6 +1,6 @@
-# YI Action Controller · Hito 3: vista previa RTSP
+# YI Action Controller · Hito 4: conexión Wi-Fi local-only
 
-Android nativo, Kotlin y Jetpack Compose. Hito limitado al socket TCP de la
+Android nativo, Kotlin y Jetpack Compose. Control y vista previa de la
 Xiaomi YI original YDXJ01XY. Referencia física aportada: hardware `YDXJ_v23L`,
 firmware `YDXJv25L_1.5.12`, teléfono Android 16. Estas versiones no se usan
 como valores de la UI. Se conserva la arquitectura y el diagnóstico del Hito 1.
@@ -8,13 +8,14 @@ como valores de la UI. Se conserva la arquitectura y el diagnóstico del Hito 1.
 ## Uso
 
 1. Instala `app/build/outputs/apk/debug/app-debug.apk`.
-2. Conecta el teléfono manualmente al Wi-Fi de la cámara. Acepta permanecer en
-   esa red aunque Android indique que no tiene Internet.
-3. Pulsa **Conectar**. La app abre `192.168.42.1:7878`, obtiene un token con
+2. Enciende la cámara y su Wi-Fi. Desde Android 10 introduce el SSID exacto y
+   la contraseña en la app. En Android 8/9 conecta manualmente desde Ajustes.
+3. Pulsa **Conectar a cámara** y concede los permisos y la autorización del sistema.
+   Tras confirmar una ruta local, la app abre `192.168.42.1:7878`, obtiene un token con
    `msg_id=257` y consulta batería (`13`) y configuración (`3`).
 4. **Consultar batería y configuración** repite ambas consultas. El socket sigue
    leyendo eventos incluso sin pulsar este botón.
-5. **Desconectar** cierra el socket y borra el estado de la sesión. La siguiente
+5. **Desconectar** libera preview, socket y solicitud Wi-Fi y borra el estado de la sesión. La siguiente
    conexión siempre solicita un token nuevo.
 
 La sección **Control** añade **Hacer foto**, **Iniciar grabación** y **Detener grabación**. Solo admite acciones con
@@ -79,7 +80,9 @@ confirman el evento `vf_start`, pero no muestran `app_status` tras detener.
 
 Los datos móviles pueden permanecer activos: si se identifica una Wi-Fi con
 ruta específica hacia la YI, la app liga los sockets de control y de RTSP a esa
-Network. No conecta automáticamente al Wi-Fi ni modifica la red predeterminada.
+Network. Desde el Hito 4 solicita la Wi-Fi local-only al pulsar el botón; no
+conecta al arrancar ni modifica la red predeterminada. Internet simultáneo
+requiere la prueba física descrita al final.
 
 ## Estructura y protocolo
 
@@ -214,7 +217,7 @@ El usuario ha compartido el historial generado en la prueba física del 08/09/20
 El usuario ha confirmado los Hitos 1 y 2 completos y validados físicamente,
 incluida la corrección de los estados de grabación descrita anteriormente.
 La vista previa UDP ha reproducido vídeo físicamente según las pruebas del
-usuario; quedan pendientes los escenarios indicados al final. En la prueba
+usuario, incluidos rotación, grabación simultánea y background. En la prueba
 inicial del 07/09/2026, Media3 obtuvo información H.264
 432 × 240 y la cámara rechazó el SETUP con `461` al solicitar RTP sobre TCP.
 Ese rechazo no demostraba reproducción de frames; las pruebas posteriores
@@ -256,7 +259,7 @@ de recuperación está cubierta por tests y validada en la cámara.
 No considera el rechazo como éxito ni abre RTSP basándose solo en
 `preview_status=on`.
 
-1. Conectar manualmente el teléfono al Wi-Fi de la YI y pulsar **Conectar**.
+1. Conectar a la YI (en el Hito 4, mediante **Conectar a cámara** desde la app).
 2. Pulsar **Iniciar vista previa**. Se exige sesión TCP conectada y se confirma
    una Network Wi-Fi con ruta a la cámara.
 3. Se envía `START_PREVIEW=259` con el token actual y se espera `rval=0`.
@@ -307,12 +310,9 @@ compilar este adaptador contra el
 desbloquear inmediatamente lecturas, incluso si todavía se estaban creando.
 No se modifica `CameraClient` ni su canal de control TCP para esta adaptación.
 
-El manifiesto declara `INTERNET`, `ACCESS_NETWORK_STATE` y
-`NEARBY_WIFI_DEVICES` con `neverForLocation`. En Android 13+ se solicita el
-permiso de dispositivos cercanos al conectar/iniciar preview si falta. No se
-solicita ubicación. Si se deniega, se intenta la operación: en SDK 36 sin la
-protección experimental puede funcionar; con ella activa habrá que conceder
-el permiso desde ajustes para recuperar el acceso local.
+El Hito 4 amplía los permisos de conexión Wi-Fi (detalle más abajo). Desde
+Android 13 se solicita Dispositivos cercanos antes de conectar, sin ubicación.
+Si se deniega, el flujo se detiene con error recuperable y no inicia TCP ni preview.
 
 Prueba experimental en Android 16 (targetSdk sigue siendo **36**):
 
@@ -356,7 +356,7 @@ No hay servicio ni reproducción en segundo plano.
 Preview no bloquea foto/grabación salvo mientras haya un comando TCP pendiente.
 El evento `vf_start` de preview no debe marcar como inactiva una grabación en
 curso; la solicitud de detener grabación mantiene su semántica del Hito 2.
-La simultaneidad real depende del firmware y queda pendiente de validación.
+La simultaneidad durante inicio/parada de grabación está validada físicamente en la cámara de referencia.
 
 ### Verificación y límites
 
@@ -372,9 +372,12 @@ La simultaneidad real depende del firmware y queda pendiente de validación.
   limpieza ante error, release idempotente y durante apertura, datagramas grandes
   y lecturas parciales, timeout y desbloqueo del receptor al cerrar. El binding
   Android real se sustituye por un callback en JVM: requiere prueba física.
-- **Implementado y validado físicamente:** recuperación explícita
-  de 259/-21, datos móviles simultáneos, rotación con imagen,
-  segundo plano, grabación con preview y `RESTRICT_LOCAL_NETWORK`.
+- **Validado físicamente por el usuario (Hito 3):** recuperación explícita
+  de 259/-21, rotación con imagen, preview durante inicio/parada de grabación,
+  background que detiene preview y exige reinicio manual, y liberación con
+  `CAMERA_DISCONNECTED` al desconectar la cámara.
+- **Pendiente de prueba física del Hito 4:** solicitud local-only, Internet móvil
+  simultáneo y repetición de los escenarios con `RESTRICT_LOCAL_NETWORK`.
 
 Prueba física propuesta: conectar con datos móviles activos; iniciar preview;
 confirmar imagen/En directo; rotar; iniciar/detener grabación con preview;
@@ -385,10 +388,153 @@ Limitaciones: UDP sin fallback automático a RTP/TCP; routing
 simultáneo con datos móviles aún pendiente de validar en la cámara. Sin
 reconexión automática, pantalla completa,
 galería, listado/descarga/reproducción de archivos, cambios de resolución,
-configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 4.
+configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 5.
 
 Verificación final:
 
 ```sh
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
+
+## Hito 4 — conexión local-only
+
+### Implementado / pendiente de prueba física
+
+La conexión manual a la YI dejó al teléfono de prueba sin Internet efectivo aun
+con datos móviles activos. El flujo principal desde API 29 solicita una conexión
+temporal peer-to-peer con `WifiNetworkSpecifier`, SSID exacto y WPA2. No usa Wi-Fi
+Direct, escaneo ni sugerencias de redes. `NetworkRequest` solicita `TRANSPORT_WIFI`
+y elimina expresamente `NET_CAPABILITY_INTERNET`.
+
+`CameraWifiConnectionManager`, propiedad del ViewModel y con application context,
+mantiene una sola petición. Las callbacks se procesan en el hilo principal y se
+identifican por generación; se ignoran duplicados y callbacks de peticiones anteriores.
+`onAvailable` solo indica disponibilidad. Se esperan capacidades Wi-Fi (sin celular
+ni VPN) y `LinkProperties` con ruta unicast específica a `192.168.42.1`; la ruta
+por defecto no basta. Esto confirma encaminamiento, no identidad ni respuesta de
+la cámara: después se abre la sesión TCP y se autentica.
+
+La misma Network proporciona `socketFactory` para control TCP y RTSP. El transporte
+UDP validado del Hito 3 usa `network.bindSocket` para RTP y RTCP. No se modifica el
+routing global ni se usa `bindProcessToNetwork`/`setProcessDefaultNetwork`.
+Internet queda en la red predeterminada que elija Android. La coexistencia YI +
+4G/5G depende del dispositivo/sistema y **todavía no se afirma validada**. No se
+activa Wi-Fi ni datos móviles desde la app; la concurrencia entre dos Wi-Fi no se
+usa como requisito para permitir Wi-Fi más datos móviles.
+
+Los estados observables son `DISCONNECTED`, `REQUESTING`, `CONNECTING` (validación
+de ruta), `CONNECTED`, `UNAVAILABLE`, `LOST` y `ERROR`. Android no ofrece una callback
+que identifique con certeza cuándo está visible el consentimiento. Tampoco permite
+distinguir en `onUnavailable` cancelación/rechazo, red no encontrada y contraseña
+incorrecta/fallo de asociación: el mensaje explica las posibilidades. Permiso
+denegado, Wi-Fi desactivada, entrada inválida, falta de ruta, pérdida de Network y
+fallo de sesión TCP sí tienen errores propios y permiten reintento manual.
+
+El límite de solicitud es 45 segundos, incluida la espera de ruta tras disponibilidad.
+No se inicia TCP ni preview en una red sin validar. Al desconectar, fallar, perder
+la Network o destruirse el ViewModel se libera la callback exacta una sola vez;
+la limpieza tolera que Android ya la haya eliminado. La pérdida libera preview
+con `NETWORK_LOST` y cierra TCP; un cierre TCP sin notificación de pérdida mantiene
+`CAMERA_DISCONNECTED`. No hay reconexión automática.
+
+La rotación conserva el ViewModel, petición y sesión; los Composables no registran
+callbacks. Home detiene únicamente preview. La petición y TCP se conservan mientras
+viva el ViewModel y Android mantenga la red; preview no vuelve a iniciarse sola.
+No se añade foreground service.
+
+### Permisos y credenciales
+
+- API 26–28: fallback manual existente, sin automatización Wi-Fi legacy.
+- API 29–32: `ACCESS_FINE_LOCATION` en runtime. Se declara también
+  `ACCESS_COARSE_LOCATION` y se solicitan conjuntamente, como exige Android 12
+  para poder conceder ubicación precisa. Ambos tienen `maxSdkVersion=32`.
+  Android puede requerir que Ubicación esté activada para esta API; revisar Ajustes
+  si la solicitud falla. No se lee, deriva ni almacena ubicación.
+- API 33+: `NEARBY_WIFI_DEVICES` en runtime con `neverForLocation`; no se solicita ubicación.
+- Permisos normales: `INTERNET`, `ACCESS_NETWORK_STATE`, `CHANGE_NETWORK_STATE`,
+  `ACCESS_WIFI_STATE` y `CHANGE_WIFI_STATE`.
+
+El formulario no usa estado guardado ni persistencia. La contraseña aparece
+enmascarada y se borra del formulario al conectar; si hay diálogo de permisos,
+el ViewModel la conserva privadamente hasta recibir el resultado, incluso con
+rotación. Después se descarta la referencia de la app al crear el specifier.
+Android retiene lo necesario durante la solicitud; no se promete borrado seguro
+de Strings en la JVM. Cada reintento requiere introducir las credenciales de nuevo.
+No hay DataStore, SharedPreferences ni Keystore. Los errores de Android se convierten
+en mensajes fijos para no revelar el specifier. El diagnóstico Wi-Fi solo incluye
+estados y capacidades, sin SSID/BSSID, contraseña o número de serie. También se
+ocultan contraseñas que la cámara devuelva en configuración/eventos antes de
+exponerlas en `CameraState` y en el diagnóstico avanzado.
+
+### Protección de red local
+
+En Android 16 / targetSdk 36, probar la protección experimental con:
+
+```sh
+adb shell am compat enable RESTRICT_LOCAL_NETWORK es.jcprieto.yiactioncontroller
+adb reboot
+```
+
+Conceder Dispositivos cercanos antes de conectar; comprobar TCP y preview. Para revertir:
+
+```sh
+adb shell am compat disable RESTRICT_LOCAL_NETWORK es.jcprieto.yiactioncontroller
+adb reboot
+```
+
+Android 17 / targetSdk 37 introduce `android.permission.ACCESS_LOCAL_NETWORK`;
+su adaptación queda pendiente. No se declara ni implementa en este hito.
+
+Referencias
+oficiales: [Wi-Fi Network Request API](https://developer.android.com/develop/connectivity/wifi/wifi-bootstrap),
+[permisos Wi-Fi](https://developer.android.com/develop/connectivity/wifi/wifi-permissions),
+[permisos de ubicación en Android 12](https://developer.android.com/develop/sensors-and-location/location/permissions/runtime),
+[protección de red local](https://developer.android.com/privacy-and-security/local-network-permission).
+
+### Cubierto por tests
+
+Verificación local del 09/09/2026: `:app:testDebugUnitTest :app:assembleDebug
+:app:lintDebug` termina con **BUILD SUCCESSFUL**. Pasan **59 tests**;
+lint informa **0 errores y 17 advertencias**. APK debug generado en
+`app/build/outputs/apk/debug/app-debug.apk`. Esta comprobación no valida
+las callbacks Wi-Fi físicas ni Internet móvil simultáneo.
+
+La lógica de callbacks se prueba en JVM: petición única, pulsaciones duplicadas,
+espera de capacidades/ruta en ambos órdenes, rechazo de celular/no Wi-Fi,
+timeout sin ruta, `onUnavailable`, reintento, pérdida de ruta/red, callbacks tardías,
+limpieza idempotente y una liberación por petición. Se verifica el transporte
+compartido para TCP/preview/UDP, la ocultación de secretos y que un cierre TCP
+posterior no sustituya `NETWORK_LOST`. Se conserva la regresión Hitos 1–3.
+Las callbacks Android, el diálogo de consentimiento, la retención real en rotación
+y el routing físico no se simulan como si fueran pruebas del sistema.
+
+### Plan de pruebas físicas pendiente
+
+**A — Conexión desde app.** Olvidar/desconectar manualmente la Wi-Fi YI en Android;
+activar datos móviles; encender Wi-Fi de la cámara; abrir la app; introducir SSID
+y contraseña; pulsar Conectar a cámara; conceder permisos/diálogo si aparece;
+verificar Wi-Fi conectada, sesión TCP, batería y configuración.
+
+**B — Internet simultáneo.** Conectar mediante la app, iniciar preview y comprobar
+PLAYING. Mantener datos móviles activos, abrir una web/app que requiera Internet
+y verificar acceso. Volver a YiActionController; preview permanece detenida por
+la política de background y se puede iniciar manualmente.
+
+**C — Preview.** Iniciar preview, rotar e iniciar/detener grabación. Confirmar imagen
+estable y ausencia de otra petición Wi-Fi/consentimiento al rotar.
+
+**D — Background.** Desde PLAYING, pulsar Home: preview debe detenerse. Volver:
+Wi-Fi/TCP deben seguir disponibles si Android conservó la red, sin autoarranque de preview.
+
+**E — Desconexión física.** Apagar Wi-Fi de la YI o la cámara. Verificar pérdida de
+Network / CAMERA_DISCONNECTED según qué notificación llegue primero, player liberado,
+UI utilizable y reintento manual tras encenderla.
+
+**F — Reconectar.** Desconectar desde la app; comprobar que Internet sigue funcionando;
+volver a introducir credenciales y conectar. Verificar una liberación por solicitud,
+sin callbacks duplicadas. Probar doble pulsación, cancelar autorización, permiso
+denegado, Wi-Fi apagada, SSID inexistente y contraseña incorrecta: sin crash ni TCP/preview
+en una red no aceptada, con posibilidad de reintento.
+
+**G — RESTRICT_LOCAL_NETWORK.** Repetir conexión, control y preview con la protección
+experimental habilitada y el permiso Dispositivos cercanos concedido.
