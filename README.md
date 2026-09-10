@@ -1,4 +1,4 @@
-# YI Action Controller · Hito 4: conexión Wi-Fi local-only
+# YI Action Controller · Hito 4B: conexión persistente connectedDevice
 
 Android nativo, Kotlin y Jetpack Compose. Control y vista previa de la
 Xiaomi YI original YDXJ01XY. Referencia física aportada: hardware `YDXJ_v23L`,
@@ -11,11 +11,14 @@ como valores de la UI. Se conserva la arquitectura y el diagnóstico del Hito 1.
 2. Enciende la cámara y su Wi-Fi. Desde Android 10 introduce el SSID exacto y
    la contraseña en la app. En Android 8/9 conecta manualmente desde Ajustes.
 3. Pulsa **Conectar a cámara** y concede los permisos y la autorización del sistema.
+   Se inicia el servicio de conexión con una notificación. En Android 13+ se pide
+   permiso para mostrar notificaciones; denegarlo no impide la conexión ni el FGS.
    Tras confirmar una ruta local, la app abre `192.168.42.1:7878`, obtiene un token con
    `msg_id=257` y consulta batería (`13`) y configuración (`3`).
 4. **Consultar batería y configuración** repite ambas consultas. El socket sigue
    leyendo eventos incluso sin pulsar este botón.
-5. **Desconectar** libera preview, socket y solicitud Wi-Fi y borra el estado de la sesión. La siguiente
+5. **Desconectar**, en la app o la notificación, libera preview, socket y solicitud
+   Wi-Fi, detiene el servicio y borra el estado de la sesión. La siguiente
    conexión siempre solicita un token nuevo.
 
 La sección **Control** añade **Hacer foto**, **Iniciar grabación** y **Detener grabación**. Solo admite acciones con
@@ -92,15 +95,19 @@ requiere la prueba física descrita al final.
   profundidad, cadenas y escapes. No usa `readLine()`. Límite de 1 MiB por
   objeto en el transporte. Decodifica UTF-8 después de completar cada objeto.
 - `CameraProtocol`: DTO con kotlinx.serialization, configuración y eventos.
-- `CameraViewModel`: propietario del cliente; conserva la sesión al rotar la
-  pantalla y la cierra al destruirse. Sin servicio de segundo plano.
+- `CameraConnectionService`: servicio started + bound, propietario del único
+  `CameraClient`, petición Wi-Fi y binding. Mantiene la conexión sin depender de la UI.
+- `CameraSessionRecovery`: política testeable de recuperación TCP tras desbloqueo.
+- `CameraViewModel`: observa el Binder local y posee exclusivamente preview/UI;
+  al destruirse libera el reproductor y se desvincula, sin desconectar el servicio.
 - `MainActivity`: diagnóstico Compose con recogida de estado ligada al ciclo
   de vida, errores, configuración completa y último mensaje/evento seleccionables.
 
 Conexión y respuestas tienen un plazo de 5 segundos. El timeout de lectura de
 250 ms permite atender botones y plazos; no desconecta por inactividad cuando
 no hay comandos pendientes. EOF, JSON inválido, respuesta ausente y fallo de
-autenticación cierran la sesión. No hay reconexión automática. Un `rval` distinto
+autenticación cierran la sesión. Solo hay un intento automático TCP por desbloqueo
+de la misma Network (Hito 4B), nunca reconexión Wi-Fi automática. Un `rval` distinto
 de cero en las consultas se muestra como error sin aplicar el contenido.
 Las consultas se envían de una en una: primero batería, y solo al recibir su
 respuesta se envía configuración. Los eventos no liberan la petición pendiente.
@@ -336,8 +343,8 @@ Referencia: [protección de red local de Android](https://developer.android.com/
 
 ### Estados y ciclo de vida
 
-`CameraViewModel` mantiene `CameraClient`, el proveedor de Network y
-`CameraPreviewController`, que gobierna `Media3PreviewPlayer`. El reproductor
+`CameraViewModel` mantiene `CameraPreviewController`, que gobierna
+`Media3PreviewPlayer`; cliente y Network pertenecen al servicio desde Hito 4B. El reproductor
 no se crea desde Compose. `PlayerView` se adjunta con `AndroidView`, en una
 superficie 16:9, y elimina su referencia al player al abandonar la composición.
 
@@ -351,7 +358,8 @@ La rotación conserva el ViewModel y el reproductor. `Activity.onStop` detiene
 preview al abandonar la pantalla, exceptuando cambios de configuración. No se
 reinicia al volver a foreground. Detener, desconectar cámara, perder la Network,
 un error fatal o `ViewModel.onCleared` liberan el player; `release` es idempotente.
-No hay servicio ni reproducción en segundo plano.
+No hay reproducción en segundo plano. El servicio connectedDevice conserva solo
+la conexión, no Media3 ni RTP/RTCP del preview detenido.
 
 Preview no bloquea foto/grabación salvo mientras haya un comando TCP pendiente.
 El evento `vf_start` de preview no debe marcar como inactiva una grabación en
@@ -386,7 +394,7 @@ Wi-Fi o la cámara; reconectar y reintentar. Repetir con protección local activ
 
 Limitaciones: UDP sin fallback automático a RTP/TCP; conservación de TCP al
 abrir otra app pendiente de resolver. Sin
-reconexión automática, pantalla completa,
+reconexión automática Wi-Fi, pantalla completa,
 galería, listado/descarga/reproducción de archivos, cambios de resolución,
 configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 5.
 
@@ -396,7 +404,7 @@ Verificación final:
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
 
-## Hito 4 — conexión local-only
+## Hito 4A — conexión local-only
 
 ### Validación física e incidencia abierta — 09/09/2026
 
@@ -417,21 +425,16 @@ después la app emite `CAMERA_CONNECTION` y libera la callback como limpieza. No
 aparece `onLost` previo en el fragmento aportado. Seguir asociado al AP no implica
 que la sesión TCP o la solicitud de la app sigan activas.
 
-Hipótesis pendiente de confirmar: Android puede cerrar los sockets TCP cuando
-congela los procesos de una app en caché, aunque la asociación Wi-Fi permanezca
-([Cached apps freezer, AOSP](https://source.android.com/docs/core/perf/cached-apps-freezer)).
-La diferencia entre Home y abrir otra app es compatible con esa política, pero
-este historial no demuestra que sea la causa en el teléfono probado.
+El historial posterior del 09/09/2026 a las 20:04 muestra
+`onBlockedStatusChanged(network, true)` antes del fallo de socket. Esto confirma
+que Android bloqueó el acceso del UID a la Network, **no identifica la causa**.
+No se atribuye a process freezer, Doze, App Standby, ahorro de batería ni a una
+política del fabricante. El Hito 4B, descrito abajo, sustituye la limpieza global
+por separación Wi-Fi/TCP y añade el servicio conectado.
 
-Se corrige una pérdida de evidencia: la limpieza Wi-Fi ya no vuelve a llamar
-`client.disconnect()` cuando TCP está cerrado, por lo que conserva su error en
-el diagnóstico de sesión. El historial añade tipo de fallo (`EOF`, `SOCKET`, etc.)
-y errno conocidos, sin copiar mensajes de excepción ni credenciales. También
-registra vuelta a foreground y `onBlockedStatusChanged`. Repetir B/D y copiar el
-historial para distinguir cierre remoto, error de socket y restricciones de red.
-No se añade reconexión automática, keepalive de protocolo ni foreground service.
-Verificación de esta revisión: 60 tests pasando, APK debug generado y lint con
-0 errores y 17 advertencias. La causa física del cierre TCP sigue pendiente de confirmar.
+El diagnóstico conserva tipo de fallo (`EOF`, `SOCKET`, etc.) y errno conocidos,
+sin copiar mensajes de excepción ni credenciales. La última revisión previa al
+Hito 4B pasó 60 tests y lint con 0 errores y 17 advertencias.
 
 ### Implementación
 
@@ -441,7 +444,7 @@ temporal peer-to-peer con `WifiNetworkSpecifier`, SSID exacto y WPA2. No usa Wi-
 Direct, escaneo ni sugerencias de redes. `NetworkRequest` solicita `TRANSPORT_WIFI`
 y elimina expresamente `NET_CAPABILITY_INTERNET`.
 
-`CameraWifiConnectionManager`, propiedad del ViewModel y con application context,
+`CameraWifiConnectionManager`, ahora propiedad del servicio y con application context,
 mantiene una sola petición. Las callbacks se procesan en el hilo principal y se
 identifican por generación; se ignoran duplicados y callbacks de peticiones anteriores.
 `onAvailable` solo indica disponibilidad. Se esperan capacidades Wi-Fi (sin celular
@@ -459,7 +462,7 @@ activa Wi-Fi ni datos móviles desde la app; la concurrencia entre dos Wi-Fi no 
 usa como requisito para permitir Wi-Fi más datos móviles.
 
 Los estados observables son `DISCONNECTED`, `REQUESTING`, `CONNECTING` (validación
-de ruta), `CONNECTED`, `UNAVAILABLE`, `LOST` y `ERROR`. Android no ofrece una callback
+de ruta), `CONNECTED`, `BLOCKED` (Hito 4B), `UNAVAILABLE`, `LOST` y `ERROR`. Android no ofrece una callback
 que identifique con certeza cuándo está visible el consentimiento. Tampoco permite
 distinguir en `onUnavailable` cancelación/rechazo, red no encontrada y contraseña
 incorrecta/fallo de asociación: el mensaje explica las posibilidades. Permiso
@@ -467,16 +470,18 @@ denegado, Wi-Fi desactivada, entrada inválida, falta de ruta, pérdida de Netwo
 fallo de sesión TCP sí tienen errores propios y permiten reintento manual.
 
 El límite de solicitud es 45 segundos, incluida la espera de ruta tras disponibilidad.
-No se inicia TCP ni preview en una red sin validar. Al desconectar, fallar, perder
-la Network o destruirse el ViewModel se libera la callback exacta una sola vez;
+Un bloqueo temporal conserva la petición; si al desbloquear aún falta validar la
+ruta inicial, se vuelve a acotar esa espera a 45 segundos sin crear otra petición.
+No se inicia TCP ni preview en una red sin validar. Al desconectar, fallar la
+solicitud Wi-Fi, perder la Network o destruirse el servicio se libera la callback exacta una sola vez;
 la limpieza tolera que Android ya la haya eliminado. La pérdida libera preview
 con `NETWORK_LOST` y cierra TCP; un cierre TCP sin notificación de pérdida mantiene
-`CAMERA_DISCONNECTED`. No hay reconexión automática.
+`CAMERA_DISCONNECTED`. Un fallo TCP ya no libera la petición Wi-Fi.
 
 La rotación conserva el ViewModel, petición y sesión; los Composables no registran
 callbacks. Home detiene únicamente preview. La petición y TCP se conservan mientras
-viva el ViewModel y Android mantenga la red; preview no vuelve a iniciarse sola.
-No se añade foreground service.
+viva el servicio y Android mantenga la red; preview no vuelve a iniciarse sola.
+El Hito 4B añade foreground service y una recuperación TCP por desbloqueo.
 
 ### Permisos y credenciales
 
@@ -495,7 +500,8 @@ enmascarada y se borra del formulario al conectar; si hay diálogo de permisos,
 el ViewModel la conserva privadamente hasta recibir el resultado, incluso con
 rotación. Después se descarta la referencia de la app al crear el specifier.
 Android retiene lo necesario durante la solicitud; no se promete borrado seguro
-de Strings en la JVM. Cada reintento requiere introducir las credenciales de nuevo.
+de Strings en la JVM. Una nueva solicitud Wi-Fi requiere introducir las credenciales
+de nuevo; reintentar solo TCP reutiliza la Network sin pedir contraseña.
 No hay DataStore, SharedPreferences ni Keystore. Los errores de Android se convierten
 en mensajes fijos para no revelar el specifier. El diagnóstico Wi-Fi solo incluye
 estados y capacidades, sin SSID/BSSID, contraseña o número de serie. También se
@@ -574,3 +580,156 @@ en una red no aceptada, con posibilidad de reintento.
 
 **G — RESTRICT_LOCAL_NETWORK.** Repetir conexión, control y preview con la protección
 experimental habilitada y el permiso Dispositivos cercanos concedido.
+
+## Hito 4B — conexión persistente connectedDevice
+
+### Implementado / pendiente de prueba física
+
+La conexión pertenece a `CameraConnectionService`, servicio **started + bound**
+del mismo proceso, no exportado, de tipo `connectedDevice`. Hay un solo
+`CameraClient`, un `CameraWifiConnectionManager` y un binding activo por conexión.
+El ViewModel observa sus StateFlow mediante un Binder local y delega los comandos
+existentes. No se serializa Network ni PreviewTransport y no hay singleton de servicio.
+
+**Conectar a cámara** inicia el servicio desde la Activity visible mediante
+`ContextCompat.startForegroundService`. El servicio llama a
+`ServiceCompat.startForeground` antes de solicitar Wi-Fi. Se declaran
+`FOREGROUND_SERVICE` y `FOREGROUND_SERVICE_CONNECTED_DEVICE`; los permisos
+`CHANGE_NETWORK_STATE`/`CHANGE_WIFI_STATE` ya existentes cubren el prerrequisito
+de connectedDevice. No se usa el tipo `camera`: no accedemos a la cámara del teléfono.
+Se mantienen minSdk 26, targetSdk 36 y fallback manual para API 26–28.
+
+El canal **Conexión con cámara YI** tiene importancia LOW. La notificación ongoing
+muestra conexión en curso, conectada o temporalmente bloqueada, abre MainActivity
+al tocarla e incluye **Desconectar**. Los PendingIntent son explícitos e inmutables,
+sin credenciales. En API 33+ se solicita `POST_NOTIFICATIONS`; denegarlo **no
+impide el FGS**, aunque Android no muestre su notificación en el drawer.
+La app nunca usa ese permiso como requisito técnico de conexión.
+
+El servicio se inicia sin extras de credenciales. Tras el permiso Wi-Fi y la
+promoción foreground, el ViewModel entrega SSID/contraseña por el Binder; las
+referencias temporales se limpian después. No se guardan en StateFlow, SavedState,
+Intent, notificación, logs ni almacenamiento. Si no llega la entrega por Binder,
+el servicio abandona el arranque tras un plazo acotado de 30 segundos.
+
+### BLOCKED no es LOST
+
+`onBlockedStatusChanged(true)` conserva candidate, Network, capacidades/ruta
+conocidas y NetworkRequest; publica `BLOCKED` y el diagnóstico **Network BLOCKED
+por Android**. No llama a unregister, fail ni lost por ese bloqueo. La callback
+no consulta síncronamente capacidades o LinkProperties.
+
+Un fallo TCP, tanto en CONNECTED como en BLOCKED, cierra solo la sesión y limpia
+el token, **sin liberar la petición Wi-Fi ni el binding**. El error de sesión
+permanece visible. Al recibir desbloqueo de la misma Network validada se vuelve
+a CONNECTED. Si TCP está desconectado, `CameraSessionRecovery` hace **un intento**
+con la misma SocketFactory: login 257, token nuevo, batería y configuración.
+No se crea WifiNetworkSpecifier ni se repite consentimiento. Si falla, no hay
+bucle: queda **Reintentar sesión TCP**, que también usa la Network conservada.
+
+`onLost` sí termina esa conexión: libera preview, cierra TCP (incluido un intento
+de recuperación), limpia binding, libera la callback y detiene el foreground
+service. Perder la ruta o recibir una red inválida se distingue de LOST como
+error terminal de validación. Un fallo TCP aislado no basta para inferir pérdida
+Wi-Fi; si Android no informa pérdida, se mantiene la solicitud hasta desconexión
+explícita o un error terminal de red.
+
+### Ciclo de vida y límites
+
+- Rotar mantiene ViewModel y preview; no crea cliente, servicio ni solicitud nuevos.
+- Home/otra app detienen preview y liberan Media3/RTP/RTCP. STOP_PREVIEW 260 usa el
+  cliente del servicio cuando TCP está disponible. No hay preview en background.
+- Volver no reinicia preview. Desvincular o destruir la UI no cierra la conexión:
+  el servicio está iniciado además de vinculado. Un nuevo Binder observa el estado real.
+- Desconectar desde UI o notificación ejecuta la misma limpieza idempotente:
+  libera el preview de la UI, TCP, NetworkRequest y binding, elimina notificación
+  y llama a stopSelf. Si la UI aún está vinculada, Android puede conservar la
+  instancia inactiva del servicio hasta el unbind; no quedan conexión ni FGS activos.
+- `START_NOT_STICKY`: tras muerte del proceso/force-stop no se reconstruye la sesión,
+  no se recuperan credenciales y no se solicita Wi-Fi sin una nueva acción del usuario.
+- No hay reconexión Wi-Fi automática, keepalive de protocolo, WakeLock, WifiLock,
+  WorkManager, CompanionDeviceManager, persistencia, cambio de routing global ni Hito 5.
+
+El historial limitado existente añade estados SERVICE/WIFI/TCP, vínculo de UI,
+suspensión durante BLOCKED, intento tras UNBLOCK, éxito con token nuevo (sin
+registrar su valor) o fallo. No se registra contraseña, token, BSSID ni número de serie.
+
+**No está físicamente demostrado que FGS evite el bloqueo.** Se conservan ambos
+caminos: TCP permanece vivo, o Android bloquea la Network y la sesión se recupera
+una vez al desbloquearse. La callback no explica por qué Android bloqueó el acceso.
+
+Referencias oficiales:
+[tipo connectedDevice](https://developer.android.com/develop/background-work/services/fgs/service-types),
+[arranque foreground](https://developer.android.com/develop/background-work/services/fgs/launch),
+[servicios started + bound](https://developer.android.com/develop/background-work/services/bound-services),
+[NetworkCallback](https://developer.android.com/reference/android/net/ConnectivityManager.NetworkCallback).
+
+### Cubierto por tests
+
+Verificación final del **10/09/2026**: `:app:testDebugUnitTest :app:assembleDebug
+:app:lintDebug` termina con **BUILD SUCCESSFUL**. **74 tests pasan**, sin fallos,
+errores ni tests omitidos. Lint: **0 errores y 17 advertencias** (las existentes;
+no se actualizan dependencias como parte de este hito). APK debug:
+`app/build/outputs/apk/debug/app-debug.apk`.
+
+Tests JVM de BLOCKED idempotente, conservación de candidate/Network/request,
+capacidades previas al desbloqueo, generación antigua/red distinta ignoradas,
+unblock sin nueva solicitud y LOST/disconnect desde bloqueo con una sola liberación.
+La política de sesión cubre separación TCP/Wi-Fi, un intento por transición,
+misma SocketFactory para reconectar y preview, ausencia de bucles, reintento manual,
+limpieza idempotente y cancelación tras pérdida. Un servidor TCP local comprueba
+login real con token nuevo, consultas de batería/configuración y borrado del token anterior.
+
+Los contratos de código/Manifest comprueban propietario único, unbind sin
+desconexión, preview en UI, acción de notificación por la misma limpieza, FGS
+connectedDevice privado, START_NOT_STICKY, permisos y ausencia de credenciales en
+Intent. No simulan el lifecycle Android, su diálogo Wi-Fi o la notificación real.
+Se ejecuta también toda la regresión Hitos 1–4A.
+
+### Validado físicamente
+
+Se conservan las validaciones Hitos 1–3 y los resultados 4A indicados arriba. **Hito 4B pendiente:** continuidad de
+cámara con navegador y datos móviles,
+notificación/servicio reales y recuperación ante bloqueo con el nuevo APK.
+
+### Plan de pruebas físicas 4B
+
+**A — Baseline.** Abrir app, conectar YI, confirmar Servicio activo, notificación
+y TCP conectado. Iniciar preview y confirmar PLAYING. Probar también denegar
+notificaciones: debe permitirse el FGS y la conexión.
+
+**B — Background con navegador.** Desde PLAYING, ir a Home/abrir navegador:
+preview se detiene y servicio continúa. Navegar por datos móviles; volver después
+de **1 minuto** y repetir esperando **5 minutos**. Copiar historial y comprobar
+BLOCKED/UNBLOCKED, continuidad de Network, estado TCP e intentos de recuperación.
+Ideal: sin bloqueo, TCP sigue conectado y ningún diálogo Wi-Fi nuevo.
+Alternativa aceptable: BLOCKED conserva NetworkRequest, TCP cae, UNBLOCKED
+recupera TCP y no aparece otro diálogo. Preview queda detenida en ambos casos.
+
+**C — Rotación.** Con servicio conectado y preview activo, rotar: sin otro servicio,
+cliente, request ni consentimiento. No debe obtenerse token nuevo salvo recuperación
+real de TCP. Repetir inicio/parada de grabación.
+
+**D — Notificación.** En background tocar notificación y comprobar estado actual.
+Volver a background y pulsar **Desconectar**: TCP termina, callback se libera una
+vez, servicio deja de estar activo y notificación desaparece. La UI debe mostrar
+desconectada al volver; comprobar que Internet continúa.
+
+**E — Apagar cámara.** Con servicio activo, apagar YI; comprobar onLost/error real
+de red, limpieza y servicio detenido sin nueva solicitud automática. Si solo
+llega fallo TCP sin pérdida de Network, conservar Wi-Fi y comprobar reintento
+manual o Desconectar; no confundirlo con onLost.
+
+**F — Recuperación BLOCKED.** Si se reproduce, comprobar que no se libera callback.
+Volver a foreground, observar UNBLOCKED, un intento TCP con nuevo login/token y
+ausencia de diálogo Wi-Fi. Si falla, sin bucles y con reintento manual disponible.
+
+**G — Internet simultáneo.** Con servicio manteniendo YI, abrir navegador, comprobar
+Internet por datos móviles, volver y verificar cámara. Repetir conexión/control/
+preview con RESTRICT_LOCAL_NETWORK habilitado siguiendo los comandos de 4A.
+
+Verificación local requerida:
+
+```sh
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+```

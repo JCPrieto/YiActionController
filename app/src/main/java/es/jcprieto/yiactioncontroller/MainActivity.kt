@@ -26,6 +26,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.Player
@@ -37,24 +38,38 @@ class MainActivity : ComponentActivity() {
     private val model by lazy { ViewModelProvider(this)[CameraViewModel::class.java] }
     private val nearbyPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         model.permissionResult(hasWifiPermission())
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) model.startConnectionIfReady()
     }
 
-    private fun hasWifiPermission(): Boolean = checkSelfPermission(
+    private fun hasWifiPermission(): Boolean = Build.VERSION.SDK_INT < 29 || checkSelfPermission(
         if (Build.VERSION.SDK_INT >= 33) Manifest.permission.NEARBY_WIFI_DEVICES
         else Manifest.permission.ACCESS_FINE_LOCATION
     ) == PackageManager.PERMISSION_GRANTED
 
     private fun connectCamera(ssid: String, password: String) {
-        if (Build.VERSION.SDK_INT < 29) {
-            model.connectManual(); return
-        }
         if (!model.prepareConnection(ssid, password)) return
-        if (hasWifiPermission()) model.permissionResult(true)
-        else nearbyPermission.launch(
-            if (Build.VERSION.SDK_INT >= 33)
-                arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES)
-            else arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION)
-        )
+        val permissions = when {
+            Build.VERSION.SDK_INT >= 33 -> arrayOf(
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+                Manifest.permission.POST_NOTIFICATIONS
+            )
+
+            Build.VERSION.SDK_INT >= 29 -> arrayOf(
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+
+            else -> emptyArray()
+        }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (permissions.isEmpty()) {
+            model.permissionResult(true)
+            model.startConnectionIfReady()
+        } else nearbyPermission.launch(permissions.toTypedArray())
+    }
+
+    override fun onResume() {
+        super.onResume()
+        model.startConnectionIfReady()
     }
 
     override fun onStop() {
@@ -78,11 +93,14 @@ class MainActivity : ComponentActivity() {
                 val history by model.diagnosticHistory.collectAsStateWithLifecycle()
                 val wifi by model.wifiStatus.collectAsStateWithLifecycle()
                 val permissionPending by model.permissionPending.collectAsStateWithLifecycle()
+                val serviceActive by model.serviceActive.collectAsStateWithLifecycle()
+                val connectionError by model.connectionError.collectAsStateWithLifecycle()
                 Diagnostics(
                     state, ::connectCamera, model::disconnect, model::refresh,
                     model::takePhoto, model::startRecording, model::stopRecording,
                     preview, player, network != null, model::startPreview, model::stopPreview,
-                    history, model::clearDiagnosticHistory, model::restartPreview, wifi, permissionPending
+                    history, model::clearDiagnosticHistory, model::restartPreview, wifi, permissionPending,
+                    serviceActive, connectionError, model::retryTcp
                 )
             }
         }
@@ -109,20 +127,27 @@ private fun Diagnostics(
     restartPreview: () -> Unit,
     wifi: CameraWifiStatus<Network>,
     permissionPending: Boolean,
+    serviceActive: Boolean,
+    connectionError: String?,
+    retryTcp: () -> Unit,
 ) {
     // Deliberately not rememberSaveable: credentials never enter saved instance state.
     var ssid by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     val automaticWifi = Build.VERSION.SDK_INT >= 29
-    val wifiActive = permissionPending || wifi.state in setOf(
-        CameraWifiState.REQUESTING, CameraWifiState.CONNECTING, CameraWifiState.CONNECTED
+    val wifiActive = permissionPending || serviceActive || wifi.state in setOf(
+        CameraWifiState.REQUESTING, CameraWifiState.CONNECTING, CameraWifiState.CONNECTED, CameraWifiState.BLOCKED
     )
+    val controlAvailable = wifi.state != CameraWifiState.BLOCKED
     Scaffold { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("Cámara YI", style = MaterialTheme.typography.headlineMedium)
+            Text("Servicio de conexión: " + if (serviceActive) "Activo" else "Inactivo")
+            connectionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (!controlAvailable) Text("Android ha bloqueado temporalmente el acceso a la red de la cámara.")
             if (automaticWifi) {
                 if (!wifiActive) {
                     OutlinedTextField(
@@ -143,6 +168,7 @@ private fun Diagnostics(
                         CameraWifiState.REQUESTING -> "Solicitando conexión; Android puede pedir autorización"
                         CameraWifiState.CONNECTING -> "Comprobando ruta a la cámara"
                         CameraWifiState.CONNECTED -> "Conectada"
+                        CameraWifiState.BLOCKED -> "Bloqueada por Android"
                         CameraWifiState.UNAVAILABLE -> "No disponible"
                         CameraWifiState.LOST -> "Conexión perdida"
                         CameraWifiState.ERROR -> "Error"
@@ -173,9 +199,12 @@ private fun Diagnostics(
                 OutlinedButton(onClick = disconnect) { Text("Desconectar") }
             }
             DiagnosticHistorySection(history, clearHistory)
+            if (serviceActive && wifi.state == CameraWifiState.CONNECTED && state.connection == ConnectionStatus.DISCONNECTED) {
+                Button(onClick = retryTcp) { Text("Reintentar sesión TCP") }
+            }
             Button(
                 onClick = refresh,
-                enabled = state.canSendCommand,
+                enabled = controlAvailable && state.canSendCommand,
             ) { Text(if (state.pending.isEmpty()) "Consultar batería y configuración" else "Consultando…") }
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Text("Vista previa", style = MaterialTheme.typography.titleLarge)
@@ -193,13 +222,13 @@ private fun Diagnostics(
             Text(if (networkFound) "Wi-Fi con ruta a la YI identificada" else "Wi-Fi de la YI no encontrada")
             Text("Control de streaming: ${preview.control}", style = MaterialTheme.typography.bodySmall)
             Button(
-                onClick = startPreview, enabled = state.canSendCommand && !preview.controlPending &&
+                onClick = startPreview, enabled = controlAvailable && state.canSendCommand && !preview.controlPending &&
                         preview.state in setOf(PreviewState.IDLE, PreviewState.ERROR)
             ) { Text("Iniciar vista previa") }
             if (preview.recoveryAvailable) {
                 OutlinedButton(
                     onClick = restartPreview,
-                    enabled = state.canSendCommand && state.recording == RecordingState.IDLE && !preview.controlPending,
+                    enabled = controlAvailable && state.canSendCommand && state.recording == RecordingState.IDLE && !preview.controlPending,
                 ) { Text("Reiniciar vista previa") }
                 Text("Recuperación de 259/-21: detiene el visor y espera vf_stop antes de iniciarlo. Solo con grabación inactiva.")
             }
@@ -218,9 +247,15 @@ private fun Diagnostics(
             }
             HorizontalDivider()
             Text("Control", style = MaterialTheme.typography.titleLarge)
-            Button(onClick = takePhoto, enabled = state.canTakePhoto) { Text("Hacer foto") }
-            Button(onClick = startRecording, enabled = state.canStartRecording) { Text("Iniciar grabación") }
-            OutlinedButton(onClick = stopRecording, enabled = state.canStopRecording) { Text("Detener grabación") }
+            Button(onClick = takePhoto, enabled = controlAvailable && state.canTakePhoto) { Text("Hacer foto") }
+            Button(
+                onClick = startRecording,
+                enabled = controlAvailable && state.canStartRecording
+            ) { Text("Iniciar grabación") }
+            OutlinedButton(
+                onClick = stopRecording,
+                enabled = controlAvailable && state.canStopRecording
+            ) { Text("Detener grabación") }
             if (state.recording == RecordingState.UNKNOWN) {
                 Text("Consulta la configuración para conocer el estado. Detener está disponible como recuperación.")
             }

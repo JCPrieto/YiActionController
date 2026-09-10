@@ -1,194 +1,239 @@
 package es.jcprieto.yiactioncontroller
 
 import android.app.Application
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.net.Network
-import android.os.Build
+import android.os.IBinder
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.util.UnstableApi
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @UnstableApi
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
-    private val client = CameraClient()
-    val state = client.state
-    val diagnosticHistory = client.diagnostics.entries
-    fun clearDiagnosticHistory() = client.diagnostics.clear()
-    private val networks = if (Build.VERSION.SDK_INT < 29) CameraNetworkProvider(application) else null
-    private var binding: CameraNetworkBinding<Network>? = null
+    private val app = application
+    private val service = MutableStateFlow<CameraConnectionService?>(null)
+    private var bound = false
+    private var connectJob: Job? = null
+
+    // Memory only, never SavedState or StateFlow; cleared immediately after Binder delivery.
     private var pendingSsid: String? = null
     private var pendingPassword: String? = null
+    private var permissionsReady = false
     private val mutablePermissionPending = MutableStateFlow(false)
     val permissionPending = mutablePermissionPending.asStateFlow()
+    private val uiError = MutableStateFlow<String?>(null)
+    val connectionError =
+        combine(uiError, service.flatMapLatest { it?.serviceError ?: flowOf(null) }) { local, remote ->
+            local ?: remote
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val state = service.flatMapLatest { it?.cameraState ?: flowOf(CameraState()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, CameraState())
+    val wifiStatus = service.flatMapLatest { it?.wifiStatus ?: flowOf(CameraWifiStatus<Network>()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, CameraWifiStatus())
+    val serviceActive = service.flatMapLatest { it?.active ?: flowOf(false) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val diagnosticHistory = service.flatMapLatest { it?.diagnostics?.entries ?: flowOf(emptyList()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val cameraNetwork = wifiStatus.map { it.network }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     private val playback = Media3PreviewPlayer(application)
-    private var previewNetwork: Network? = null
     private val preview = CameraPreviewController(
         viewModelScope, playback,
-        connected = { state.value.connection == ConnectionStatus.CONNECTED },
-        startControl = { client.startPreview() },
-        stopControl = {
-            val available = withTimeoutOrNull(6_000) {
-                state.first { it.canSendCommand || it.connection == ConnectionStatus.DISCONNECTED }
-            }
-            if (available?.canSendCommand == true) client.stopPreview()
-            else CameraControlResult(false, "No se pudo enviar STOP_PREVIEW: cámara desconectada o ocupada")
+        connected = { service.value?.cameraState?.value?.connection == ConnectionStatus.CONNECTED },
+        startControl = { service.value?.startPreview() ?: unavailable() },
+        stopControl = { service.value?.stopPreview() ?: unavailable() },
+        canRestart = {
+            state.value.canSendCommand && state.value.recording == RecordingState.IDLE &&
+                    wifiStatus.value.state != CameraWifiState.BLOCKED
         },
-        canRestart = { state.value.canSendCommand && state.value.recording == RecordingState.IDLE },
-        stopAndConfirm = { client.stopPreviewAndAwaitVfStop() },
+        stopAndConfirm = { service.value?.stopPreviewAndAwaitVfStop() ?: unavailable() },
     )
     val previewState = preview.status
     val player = playback.player
-    private val wifi = if (Build.VERSION.SDK_INT >= 29) CameraWifiConnectionManager(
-        application,
-        ready = { network ->
-            val selected = CameraNetworkBinding(network, network.socketFactory) { network.bindSocket(it) }
-            binding = selected
-            client.connect(selected.socketFactory)
-        },
-        lost = { networkInvalidated() },
-        diagnostic = { client.diagnostics.append("WIFI", it) },
-    ) else null
-    val wifiStatus = if (Build.VERSION.SDK_INT >= 29) wifi!!.status
-    else MutableStateFlow(CameraWifiStatus<Network>()).asStateFlow()
-    private val mutableCameraNetwork = MutableStateFlow<Network?>(null)
-    val cameraNetwork = mutableCameraNetwork.asStateFlow()
+    private fun unavailable() = CameraControlResult(false, "Sesión de cámara no disponible")
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            val connected = (binder as CameraConnectionService.LocalBinder).service
+            service.value = connected
+            connected.attachPreview(this@CameraViewModel) { lost ->
+                if (lost) preview.networkLost() else preview.cameraDisconnected()
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            service.value = null
+            preview.cameraDisconnected()
+        }
+
+        override fun onBindingDied(name: ComponentName) {
+            unbind()
+            preview.cameraDisconnected()
+            uiError.value = "El servicio dejó de estar disponible. Vuelve a conectar desde la app."
+        }
+
+        override fun onNullBinding(name: ComponentName) = onBindingDied(name)
+    }
 
     init {
+        bind()
         viewModelScope.launch {
             previewState.collect {
-                client.diagnostics.append(
+                log(
                     "PREVIEW",
                     "estado=${it.state} control=${it.control} pendiente=${it.controlPending} error=${it.errorType}"
                 )
             }
         }
         viewModelScope.launch {
-            state.collect {
-                if (it.connection == ConnectionStatus.DISCONNECTED) {
-                    preview.cameraDisconnected()
-                    if (Build.VERSION.SDK_INT >= 29 && binding != null) {
-                        binding = null
-                        wifi?.fail(CameraWifiError.CAMERA_CONNECTION)
-                    }
-                }
-            }
+            state.collect { if (it.connection == ConnectionStatus.DISCONNECTED) preview.cameraDisconnected() }
         }
         viewModelScope.launch {
-            if (Build.VERSION.SDK_INT >= 29) wifiStatus.collect { mutableCameraNetwork.value = it.network }
-            else networks?.network?.collect {
-                mutableCameraNetwork.value = it
-                if (previewNetwork != null && it != previewNetwork) preview.networkLost()
-            }
+            wifiStatus.collect { if (it.state == CameraWifiState.BLOCKED) preview.stop() }
         }
     }
 
-    fun connectManual() {
-        if (Build.VERSION.SDK_INT >= 29) return
-        val factory = networks?.refresh()?.socketFactory
-        if (factory == null) client.connect() else client.connect(factory)
+    private fun bind() {
+        if (bound) return
+        try {
+            bound =
+                app.bindService(Intent(app, CameraConnectionService::class.java), connection, Context.BIND_AUTO_CREATE)
+            if (!bound) uiError.value = "No se pudo vincular el servicio de conexión."
+        } catch (_: RuntimeException) {
+            uiError.value = "No se pudo vincular el servicio de conexión."
+        }
     }
 
-    // Kept outside saved state/StateFlow; survives a permission-dialog rotation only in memory.
+    private fun unbind() {
+        service.value?.detachPreview(this)
+        if (bound) {
+            bound = false; app.unbindService(connection)
+        }
+        service.value = null
+    }
+
     fun prepareConnection(ssid: String, password: String): Boolean {
-        if (mutablePermissionPending.value || wifiStatus.value.state in setOf(
-                CameraWifiState.REQUESTING, CameraWifiState.CONNECTING, CameraWifiState.CONNECTED
-            )
-        ) return false
+        if (permissionPending.value || connectJob?.isActive == true || serviceActive.value) return false
         pendingSsid = ssid
         pendingPassword = password
         mutablePermissionPending.value = true
+        uiError.value = null
         return true
     }
-
     fun permissionResult(granted: Boolean) {
-        val ssid = pendingSsid
-        val password = pendingPassword
-        pendingSsid = null; pendingPassword = null
-        mutablePermissionPending.value = false
-        if (ssid == null || password == null || Build.VERSION.SDK_INT < 29) return
-        if (granted) wifi?.connect(ssid, password) else wifi?.fail(CameraWifiError.PERMISSION_DENIED)
-    }
-
-    private fun networkInvalidated() {
-        if (wifiStatus.value.error == CameraWifiError.NETWORK_LOST) preview.networkLost()
-        else preview.cameraDisconnected()
-        binding = null
-        previewNetwork = null
-        // A TCP failure already closed the session. Do not erase its diagnostic error during Wi-Fi cleanup.
-        if (state.value.connection != ConnectionStatus.DISCONNECTED) client.disconnect()
-    }
-
-    fun disconnect() {
-        preview.cameraDisconnected()
-        previewNetwork = null
-        binding = null
-        client.disconnect()
-        pendingSsid = null; pendingPassword = null
-        mutablePermissionPending.value = false
-        if (Build.VERSION.SDK_INT >= 29) wifi?.close()
-    }
-
-    fun startPreview() {
-        client.diagnostics.append("UI", "Iniciar vista previa")
-        preview.start(previewTransport())
-    }
-
-    fun stopPreview() {
-        client.diagnostics.append("UI", "Detener vista previa")
-        preview.stop()
-    }
-
-    fun restartPreview() {
-        client.diagnostics.append("UI", "Reiniciar vista previa: un intento 260 + vf_stop + 259")
-        preview.restart(previewTransport())
-    }
-
-    private fun previewTransport(): PreviewTransport? {
-        if (Build.VERSION.SDK_INT >= 29) return binding?.previewTransport
-        previewNetwork = networks?.refresh()
-        return previewNetwork?.let { network ->
-            PreviewTransport(network.socketFactory) { socket -> network.bindSocket(socket) }
+        if (pendingSsid == null) return
+        if (granted) permissionsReady = true
+        else {
+            clearCredentials(); uiError.value = CameraWifiError.PERMISSION_DENIED.description
         }
     }
 
+    /** Called by the visible Activity, including after a runtime permission dialog. */
+    fun startConnectionIfReady() {
+        if (!permissionsReady || connectJob?.isActive == true) return
+        permissionsReady = false
+        bind()
+        if (!bound) {
+            clearCredentials(); return
+        }
+        try {
+            ContextCompat.startForegroundService(
+                app,
+                Intent(app, CameraConnectionService::class.java).setAction(CameraConnectionService.ACTION_CONNECT)
+            )
+        } catch (_: RuntimeException) {
+            clearCredentials()
+            uiError.value = "Android no permitió iniciar el servicio. Reintenta desde la app visible."
+            return
+        }
+        connectJob = viewModelScope.launch {
+            val connected = withTimeoutOrNull(10_000) { service.filterNotNull().first() }
+            val started = connected?.let { withTimeoutOrNull(10_000) { it.active.first { active -> active } } }
+            if (started == true) {
+                val ssid = pendingSsid
+                val password = pendingPassword
+                clearCredentials()
+                if (ssid != null && password != null) connected.connect(ssid, password)
+            } else {
+                clearCredentials()
+                uiError.value = "No se pudo iniciar el servicio de conexión."
+                connected?.disconnect()
+            }
+        }
+    }
+
+    private fun clearCredentials() {
+        pendingSsid = null
+        pendingPassword = null
+        permissionsReady = false
+        mutablePermissionPending.value = false
+    }
+    fun disconnect() {
+        connectJob?.cancel()
+        clearCredentials()
+        preview.cameraDisconnected()
+        service.value?.disconnect()
+    }
+
+    private fun log(tag: String, message: String) {
+        service.value?.diagnostics?.append(tag, message)
+    }
+
+    fun clearDiagnosticHistory() {
+        service.value?.diagnostics?.clear()
+    }
+
+    fun retryTcp() {
+        log("UI", "Reintentar sesión TCP"); service.value?.retryTcp()
+    }
+
+    fun startPreview() {
+        log("UI", "Iniciar vista previa"); preview.start(service.value?.currentPreviewTransport())
+    }
+
+    fun stopPreview() {
+        log("UI", "Detener vista previa"); preview.stop()
+    }
+    fun restartPreview() {
+        log("UI", "Reiniciar vista previa: un intento 260 + vf_stop + 259")
+        preview.restart(service.value?.currentPreviewTransport())
+    }
+
     fun onBackground() {
-        client.diagnostics.append("APP", "Segundo plano: detener preview")
-        preview.stop()
+        log("APP", "Segundo plano: detener preview"); preview.stop()
     }
 
     fun onForeground() {
-        client.diagnostics.append("APP", "Primer plano: Wi-Fi=${wifiStatus.value.state} TCP=${state.value.connection}")
+        log("APP", "Primer plano: Wi-Fi=${wifiStatus.value.state} TCP=${state.value.connection}")
     }
 
     fun refresh() {
-        client.diagnostics.append("UI", "Consultar batería y configuración")
-        client.refresh()
+        log("UI", "Consultar batería y configuración"); service.value?.refresh()
     }
 
     fun takePhoto() {
-        client.diagnostics.append("UI", "Hacer foto")
-        client.takePhoto()
+        log("UI", "Hacer foto"); service.value?.takePhoto()
     }
 
     fun startRecording() {
-        client.diagnostics.append("UI", "Iniciar grabación")
-        client.startRecording()
+        log("UI", "Iniciar grabación"); service.value?.startRecording()
     }
 
     fun stopRecording() {
-        client.diagnostics.append("UI", "Detener grabación")
-        client.stopRecording()
+        log("UI", "Detener grabación"); service.value?.stopRecording()
     }
     override fun onCleared() {
+        connectJob?.cancel()
+        clearCredentials()
         preview.release()
-        binding = null
-        client.close()
-        pendingSsid = null; pendingPassword = null
-        if (Build.VERSION.SDK_INT >= 29) wifi?.close()
-        networks?.close()
+        unbind() // Started service owns the connection independently of the UI.
     }
 }

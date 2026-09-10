@@ -91,6 +91,7 @@ class CameraNetworkBindingTest {
         assertFalse(ui.contains("requestNetwork("))
         assertFalse(ui.contains("CameraWifiConnectionManager("))
         assertFalse(ui.contains("rememberSaveable("))
-        assertTrue(sources.getValue("CameraViewModel.kt").contains("CameraWifiConnectionManager("))
+        assertFalse(sources.getValue("CameraViewModel.kt").contains("CameraWifiConnectionManager("))
+        assertTrue(sources.getValue("CameraConnectionService.kt").contains("CameraWifiConnectionManager("))
     }
 }

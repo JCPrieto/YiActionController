@@ -115,17 +115,105 @@ class CameraWifiRequestTest {
     }
 
     @Test
-    fun routeLossAndTcpFailureReleaseRequest() {
+    fun routeFailureIsTerminalButTcpFailurePreservesRequest() {
         val f = Fixture();
         val id = f.begin(); f.ready(id)
         f.request.route(id, "wifi", false)
-        assertEquals(CameraWifiState.LOST, f.request.status.value.state)
+        assertEquals(CameraWifiState.ERROR, f.request.status.value.state)
+        assertEquals(CameraWifiError.NO_ROUTE, f.request.status.value.error)
         assertEquals(1, f.lost)
         val next = f.begin(); f.ready(next)
         f.request.fail(CameraWifiError.CAMERA_CONNECTION)
-        assertEquals(CameraWifiError.CAMERA_CONNECTION, f.request.status.value.error)
+        assertNull(f.request.status.value.error)
+        assertEquals(next, f.request.active)
+        assertEquals(CameraWifiState.CONNECTED, f.request.status.value.state)
+        assertEquals(listOf(id), f.released)
         f.request.disconnect()
         assertEquals(listOf(id, next), f.released)
+    }
+
+    @Test
+    fun blockedRetainsCandidateNetworkRequestAndCapabilitiesWithoutReleasingOrNotifyingLoss() {
+        val f = Fixture()
+        val id = f.begin(); f.ready(id)
+        f.request.blocked(id, "wifi", true)
+        f.request.blocked(id, "wifi", true)
+        f.request.timeout(id)
+        f.request.fail(CameraWifiError.CAMERA_CONNECTION)
+        assertEquals(id, f.request.active)
+        assertEquals("wifi", f.request.status.value.network)
+        assertEquals(CameraWifiState.BLOCKED, f.request.status.value.state)
+        assertEquals(0, f.lost)
+        assertTrue(f.released.isEmpty())
+        assertEquals(1, f.history.entries.value.count { it.contains("Network BLOCKED") })
+        f.request.blocked(id, "wifi", false)
+        f.request.blocked(id, "wifi", false)
+        assertEquals(CameraWifiState.CONNECTED, f.request.status.value.state)
+        assertEquals("wifi", f.request.status.value.network)
+        assertEquals(id, f.request.active)
+        assertEquals(listOf("wifi"), f.connected) // No second initial-session callback.
+        assertTrue(f.released.isEmpty())
+    }
+
+    @Test
+    fun oldGenerationAndWrongNetworkBlockedCallbacksAreIgnored() {
+        val f = Fixture()
+        val old = f.begin(); f.ready(old); f.request.disconnect()
+        val id = f.begin(); f.ready(id)
+        f.request.blocked(old, "wifi", true)
+        f.request.blocked(id, "other", true)
+        assertEquals(CameraWifiState.CONNECTED, f.request.status.value.state)
+        f.request.blocked(id, "wifi", true)
+        f.request.blocked(old, "wifi", false)
+        f.request.blocked(id, "other", false)
+        assertEquals(CameraWifiState.BLOCKED, f.request.status.value.state)
+    }
+
+    @Test
+    fun lostAndDisconnectFromBlockedReleaseOnceAndLateUnblockCannotResurrect() {
+        for (physicalLoss in listOf(true, false)) {
+            val f = Fixture()
+            val id = f.begin(); f.ready(id); f.request.blocked(id, "wifi", true)
+            if (physicalLoss) {
+                f.request.lost(id, "wifi")
+                assertEquals(CameraWifiState.LOST, f.request.status.value.state)
+                assertEquals(1, f.lost)
+            } else f.request.disconnect()
+            assertNull(f.request.status.value.network)
+            assertNull(f.request.active)
+            f.request.blocked(id, "wifi", false)
+            f.request.disconnect(); f.request.disconnect()
+            assertEquals(listOf(id), f.released)
+            assertEquals(listOf("wifi"), f.connected)
+        }
+    }
+
+    @Test
+    fun initialBlockedNetworkCannotBeAcceptedUntilUnblockedAndValidated() {
+        val f = Fixture()
+        val id = f.begin(); f.request.available(id, "wifi")
+        f.request.blocked(id, "wifi", true)
+        f.request.capabilities(id, "wifi", true, false, false, false)
+        f.request.route(id, "wifi", true)
+        assertTrue(f.connected.isEmpty())
+        f.request.blocked(id, "wifi", false)
+        assertEquals(listOf("wifi"), f.connected)
+    }
+
+    @Test
+    fun unblockWithoutInitialRouteStillRequiresValidationAndCanTimeOut() {
+        val f = Fixture()
+        val id = f.begin(); f.request.available(id, "wifi")
+        f.request.capabilities(id, "wifi", true, false, false, false)
+        f.request.blocked(id, "wifi", true)
+        f.request.timeout(id)
+        assertEquals(id, f.request.active)
+        f.request.blocked(id, "wifi", false)
+        assertEquals(CameraWifiState.CONNECTING, f.request.status.value.state)
+        assertTrue(f.connected.isEmpty())
+        f.request.timeout(id)
+        assertEquals(CameraWifiError.NO_ROUTE, f.request.status.value.error)
+        assertEquals(listOf(id), f.released)
     }
 
     @Test

@@ -3,7 +3,7 @@ package es.jcprieto.yiactioncontroller
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class CameraWifiState { DISCONNECTED, REQUESTING, CONNECTING, CONNECTED, UNAVAILABLE, LOST, ERROR }
+enum class CameraWifiState { DISCONNECTED, REQUESTING, CONNECTING, CONNECTED, BLOCKED, UNAVAILABLE, LOST, ERROR }
 enum class CameraWifiError(val description: String) {
     PERMISSION_DENIED("Permiso denegado. Concede el permiso necesario para conectar a la cámara."),
     WIFI_DISABLED("Wi-Fi desactivada. Actívala desde Android y vuelve a intentarlo."),
@@ -38,6 +38,8 @@ internal class CameraWifiRequest<N>(
     private var candidate: N? = null
     private var wifi: Boolean? = null
     private var route = false
+    private var isBlocked = false
+    private var accepted = false
 
     fun begin(ssid: String): Long? {
         if (active != null) {
@@ -46,6 +48,7 @@ internal class CameraWifiRequest<N>(
         val id = ++sequence
         active = id
         candidate = null; wifi = null; route = false
+        isBlocked = false; accepted = false
         mutableStatus.value = CameraWifiStatus(CameraWifiState.REQUESTING, ssid = ssid)
         diagnostic("Solicitud local-only iniciada; Android puede pedir autorización")
         return id
@@ -54,7 +57,7 @@ internal class CameraWifiRequest<N>(
     fun available(id: Long, network: N) {
         if (id != active || candidate == network) return
         if (candidate != null) {
-            fail(CameraWifiError.NETWORK_LOST); return
+            fail(CameraWifiError.WRONG_NETWORK); return
         }
         candidate = network
         mutableStatus.value = mutableStatus.value.copy(state = CameraWifiState.CONNECTING)
@@ -72,16 +75,30 @@ internal class CameraWifiRequest<N>(
         if (id != active || candidate != network) return
         route = usable
         diagnostic("Ruta 192.168.42.1=$usable")
-        if (!usable && status.value.state == CameraWifiState.CONNECTED) fail(CameraWifiError.NETWORK_LOST)
+        if (!usable && accepted) fail(CameraWifiError.NO_ROUTE)
         else acceptIfReady()
     }
 
+    fun blocked(id: Long, network: N, blocked: Boolean) {
+        if (id != active || candidate != network || isBlocked == blocked) return
+        isBlocked = blocked
+        diagnostic(if (blocked) "Network BLOCKED por Android" else "Network UNBLOCKED por Android")
+        if (blocked) mutableStatus.value = mutableStatus.value.copy(state = CameraWifiState.BLOCKED, network = network)
+        else {
+            if (wifi != true || !route)
+                mutableStatus.value = mutableStatus.value.copy(state = CameraWifiState.CONNECTING)
+            acceptIfReady()
+        }
+    }
+
     private fun acceptIfReady() {
-        if (wifi != true || !route || status.value.state == CameraWifiState.CONNECTED) return
+        if (wifi != true || !route || isBlocked || status.value.state == CameraWifiState.CONNECTED) return
         val network = candidate ?: return
         mutableStatus.value = mutableStatus.value.copy(state = CameraWifiState.CONNECTED, network = network)
         diagnostic("Ruta confirmada; Wi-Fi local conectada")
-        ready(network)
+        if (!accepted) {
+            accepted = true; ready(network)
+        }
     }
 
     fun unavailable(id: Long) {
@@ -89,15 +106,23 @@ internal class CameraWifiRequest<N>(
     }
 
     fun timeout(id: Long) {
-        if (id == active && status.value.state != CameraWifiState.CONNECTED)
+        if (id == active && !accepted && !isBlocked)
             fail(if (candidate != null) CameraWifiError.NO_ROUTE else CameraWifiError.UNAVAILABLE)
     }
 
     fun lost(id: Long, network: N) {
-        if (id == active && candidate == network) fail(CameraWifiError.NETWORK_LOST)
+        if (id == active && candidate == network) {
+            diagnostic("Network LOST")
+            fail(CameraWifiError.NETWORK_LOST)
+        }
     }
 
     fun fail(error: CameraWifiError) {
+        // TCP belongs to an independent session. It cannot invalidate a live Wi-Fi request.
+        if (error == CameraWifiError.CAMERA_CONNECTION) {
+            diagnostic("Fallo TCP; solicitud Wi-Fi conservada")
+            return
+        }
         val hadNetwork = candidate != null
         val id = active
         active = null; candidate = null; wifi = null; route = false

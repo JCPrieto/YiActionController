@@ -11,7 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.annotation.RequiresApi
 
-/** Owned by the ViewModel. All operations/callbacks run on the main thread. */
+/** Owned by the connection service. All operations/callbacks run on the main thread. */
 @RequiresApi(29)
 internal class CameraWifiConnectionManager(
     context: Context,
@@ -72,12 +72,19 @@ internal class CameraWifiConnectionManager(
                 override fun onLost(network: Network) = request.lost(id, network)
                 override fun onUnavailable() = request.unavailable(id)
                 override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
-                    if (callbackId == id) diagnostic("Acceso a Network bloqueado=$blocked")
+                    val wasBlocked = status.value.state == CameraWifiState.BLOCKED
+                    request.blocked(id, network, blocked)
+                    // An initial block may outlive the route deadline. Resume bounded validation
+                    // after unblocking, without replacing the request or querying Android here.
+                    if (wasBlocked && !blocked && request.active == id &&
+                        status.value.network == network && status.value.state == CameraWifiState.CONNECTING
+                    )
+                        scheduleDeadline(id)
                 }
             }
             callback = observer; callbackId = id
             // Also covers onAvailable followed by missing route/capabilities.
-            deadline = Runnable { request.timeout(id) }.also { handler.postDelayed(it, 45_000) }
+            scheduleDeadline(id)
             connectivity.requestNetwork(networkRequest, observer, handler, 45_000)
         } catch (_: SecurityException) {
             fail(CameraWifiError.PERMISSION_DENIED)
@@ -90,6 +97,10 @@ internal class CameraWifiConnectionManager(
     }
 
     fun fail(error: CameraWifiError) = request.fail(error)
+    private fun scheduleDeadline(id: Long) {
+        deadline?.let(handler::removeCallbacks)
+        deadline = Runnable { request.timeout(id) }.also { handler.postDelayed(it, 45_000) }
+    }
     private fun unregister(id: Long) {
         if (callbackId != id) return
         val observer = callback
