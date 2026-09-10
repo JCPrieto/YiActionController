@@ -392,8 +392,8 @@ confirmar imagen/En directo; rotar; iniciar/detener grabación con preview;
 detener/reiniciar preview; salir a Home y volver (sin autoarranque); apagar el
 Wi-Fi o la cámara; reconectar y reintentar. Repetir con protección local activa.
 
-Limitaciones: UDP sin fallback automático a RTP/TCP; conservación de TCP al
-abrir otra app pendiente de resolver. Sin
+Limitaciones históricas de 4A: UDP sin fallback automático a RTP/TCP. La
+conservación de TCP al abrir otra app queda resuelta y validada en 4B. Sin
 reconexión automática Wi-Fi, pantalla completa,
 galería, listado/descarga/reproducción de archivos, cambios de resolución,
 configuración avanzada, persistencia, base de datos, DI ni funciones del Hito 5.
@@ -456,8 +456,9 @@ La misma Network proporciona `socketFactory` para control TCP y RTSP. El transpo
 UDP validado del Hito 3 usa `network.bindSocket` para RTP y RTCP. No se modifica el
 routing global ni se usa `bindProcessToNetwork`/`setProcessDefaultNetwork`.
 Internet queda en la red predeterminada que elija Android. La coexistencia YI +
-4G/5G depende del dispositivo/sistema y **está validada en el teléfono de referencia**;
-la continuidad de la sesión TCP al abrir otra app sigue pendiente. No se
+4G/5G depende del dispositivo/sistema y **está validada en el teléfono de referencia**.
+Con el servicio connectedDevice, la continuidad de la sesión TCP al abrir otra app
+también quedó validada físicamente. No se
 activa Wi-Fi ni datos móviles desde la app; la concurrencia entre dos Wi-Fi no se
 usa como requisito para permitir Wi-Fi más datos móviles.
 
@@ -583,7 +584,7 @@ experimental habilitada y el permiso Dispositivos cercanos concedido.
 
 ## Hito 4B — conexión persistente connectedDevice
 
-### Implementado / pendiente de prueba física
+### Implementado y validado físicamente
 
 La conexión pertenece a `CameraConnectionService`, servicio **started + bound**
 del mismo proceso, no exportado, de tipo `connectedDevice`. Hay un solo
@@ -654,9 +655,12 @@ El historial limitado existente añade estados SERVICE/WIFI/TCP, vínculo de UI,
 suspensión durante BLOCKED, intento tras UNBLOCK, éxito con token nuevo (sin
 registrar su valor) o fallo. No se registra contraseña, token, BSSID ni número de serie.
 
-**No está físicamente demostrado que FGS evite el bloqueo.** Se conservan ambos
-caminos: TCP permanece vivo, o Android bloquea la Network y la sesión se recupera
-una vez al desbloquearse. La callback no explica por qué Android bloqueó el acceso.
+La prueba física confirmó el comportamiento esperado del FGS al cambiar entre
+YiActionController, Home y navegador: el servicio y la sesión de cámara se
+mantienen, Internet sigue funcionando por la red predeterminada y no aparece un
+nuevo diálogo Wi-Fi. Si Android envía un bloqueo temporal, se conserva la Network
+y la sesión TCP se recupera al desbloquearse. La callback sigue sin explicar por
+qué Android bloqueó el acceso.
 
 Referencias oficiales:
 [tipo connectedDevice](https://developer.android.com/develop/background-work/services/fgs/service-types),
@@ -688,11 +692,16 @@ Se ejecuta también toda la regresión Hitos 1–4A.
 
 ### Validado físicamente
 
-Se conservan las validaciones Hitos 1–3 y los resultados 4A indicados arriba. **Hito 4B pendiente:** continuidad de
-cámara con navegador y datos móviles,
-notificación/servicio reales y recuperación ante bloqueo con el nuevo APK.
+Se conservan las validaciones Hitos 1–3 y los resultados 4A indicados arriba. **Hito 4B validado físicamente por el
+usuario:** baseline, background con Home y
+navegador durante 1 y 5 minutos, Internet simultáneo, rotación, notificación y
+desconexión, apagado de cámara, reconexión, recuperación BLOCKED y
+RESTRICT_LOCAL_NETWORK. La sesión TCP permaneció utilizable al volver a la app;
+no se mostraron solicitudes Wi-Fi duplicadas.
 
-### Plan de pruebas físicas 4B
+Resultado: el Hito 4B queda **VALIDADO FÍSICAMENTE** en el teléfono de referencia.
+
+### Plan de pruebas físicas 4B (completado)
 
 **A — Baseline.** Abrir app, conectar YI, confirmar Servicio activo, notificación
 y TCP conectado. Iniciar preview y confirmar PLAYING. Probar también denegar
