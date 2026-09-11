@@ -782,7 +782,7 @@ La conversión centralizada multiplica por 1024 y rechaza negativos, overflow o
 libre mayor que total. La UI muestra GiB/MiB. Conservamos timestampRaw:
 hay fechas de 2008 y 2023 y no representan una cronología fiable.
 
-### Implementado / pendiente de prueba física de la UI 5A
+### Implementado y validado físicamente
 
 La sección **Medios**, separada de Control, consulta total/free y abre DCIM
 sin asumir el nombre de su subdirectorio. Ofrece Subir, Raíz SD y Actualizar.
@@ -819,7 +819,7 @@ tokens dinámicos nuevos, msg_id repetidos, eventos intercalados, exclusión de
 peticiones, cancelación del consumidor, rval=-4, timeout y desconexión.
 Se ejecuta además la regresión de los hitos anteriores.
 
-### Prueba física pendiente — Hito 5A
+### Plan de prueba física ejecutado — Hito 5A
 
 1. Conectar la cámara desde YiActionController.
 2. Abrir Medios.
@@ -838,5 +838,7 @@ Se ejecuta además la regresión de los hitos anteriores.
 15. Volver a Control.
 16. Comprobar preview, foto y grabación; repetir listado con preview/grabación.
 
-No borrar ni descargar nada. La validación del protocolo 5.0 no sustituye esta
-prueba de integración de la nueva pantalla.
+Todas las comprobaciones anteriores fueron ejecutadas satisfactoriamente con
+la cámara real. No se borró ni descargó ningún archivo. La validación incluye
+la integración de la pantalla, la navegación segura, la rotación y la
+compatibilidad con preview, fotografía y grabación.
