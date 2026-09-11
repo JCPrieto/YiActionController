@@ -8,6 +8,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.EOFException
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -23,12 +25,20 @@ class CameraClient(
     private val socketFactory: SocketFactory = SocketFactory.getDefault(),
     val diagnostics: DiagnosticHistory = DiagnosticHistory(),
 ) : AutoCloseable {
+    private data class Outbound(
+        val id: Int,
+        val extras: Map<String, String> = emptyMap(),
+        val response: CompletableDeferred<CameraMessage>? = null,
+    )
     private class Session(val factory: SocketFactory) {
         var socket: Socket? = null
         var previewResult: Pair<Int, CompletableDeferred<CameraControlResult>>? = null
         var stopConfirmation: CompletableDeferred<Boolean>? = null
         var stopConfirmationArmed = false
-        val commands = Channel<List<Int>>(1)
+        val commands = Channel<List<Outbound>>(1)
+
+        // Covers queued, in-flight and abandoned awaits until reply/terminal cleanup.
+        var mediaResponse: CompletableDeferred<CameraMessage>? = null
 
         // Guarded by lock; reserve immediately so rapid taps cannot queue multiple actions.
         var reservedCommands: Set<Int> = emptySet()
@@ -40,6 +50,8 @@ class CameraClient(
     private var session: Session? = null
     private val mutableState = MutableStateFlow(CameraState())
     val state = mutableState.asStateFlow()
+
+    internal fun sessionIdentity(): Any? = synchronized(lock) { session }
 
     fun connect(factory: SocketFactory = socketFactory) = synchronized(lock) {
         if (session != null) return@synchronized
@@ -54,6 +66,28 @@ class CameraClient(
     fun takePhoto() = submit(listOf(CameraCommand.TAKE_PHOTO), CameraAction.TAKE_PHOTO)
     fun startRecording() = submit(listOf(CameraCommand.START_RECORDING), CameraAction.START_RECORDING)
     fun stopRecording() = submit(listOf(CameraCommand.STOP_RECORDING), CameraAction.STOP_RECORDING)
+
+    internal suspend fun requestMedia(operation: CameraMediaOperation): CameraMessage {
+        val deferred = CompletableDeferred<CameraMessage>()
+        synchronized(lock) {
+            val current = session ?: throw CameraMediaException(CameraMediaError.DISCONNECTED)
+            if (mutableState.value.connection != ConnectionStatus.CONNECTED)
+                throw CameraMediaException(CameraMediaError.DISCONNECTED)
+            if (!mutableState.value.canSendCommand) throw CameraMediaException(CameraMediaError.BUSY)
+            if (!current.commands.trySend(listOf(Outbound(operation.id, operation.arguments(), deferred))).isSuccess)
+                throw CameraMediaException(CameraMediaError.DISCONNECTED)
+            current.mediaResponse = deferred
+            current.reservedCommands = setOf(operation.id)
+            mutableState.value = mutableState.value.copy(pending = setOf(operation.id), error = null)
+        }
+        // Cancelling a caller never permits a new wire request before this one finishes.
+        val message = deferred.await()
+        if (message.rval != 0) {
+            diagnostics.append("MEDIA", "${operation.label} rval=${message.rval}")
+            throw CameraMediaException(CameraMediaError.REJECTED, message.rval)
+        }
+        return message
+    }
 
     suspend fun startPreview(): CameraControlResult = previewCommand(CameraCommand.START_PREVIEW)
     suspend fun stopPreview(): CameraControlResult = previewCommand(CameraCommand.STOP_PREVIEW)
@@ -119,7 +153,8 @@ class CameraClient(
             CameraAction.STOP_RECORDING -> previous.canStopRecording
             null -> previous.canSendCommand
         }
-        if (!allowed || !current.commands.trySend(commands).isSuccess) return@synchronized
+        val outbound = commands.map(::Outbound)
+        if (!allowed || !current.commands.trySend(outbound).isSuccess) return@synchronized
         current.reservedCommands = commands.toSet()
         mutableState.value = previous.copy(
             pending = current.reservedCommands,
@@ -148,6 +183,8 @@ class CameraClient(
         previous?.stopConfirmation?.complete(false)
         runCatching { previous?.socket?.close() } // Unblocks read/connect immediately.
         mutableState.value = CameraState()
+        previous?.mediaResponse?.completeExceptionally(CameraMediaException(CameraMediaError.DISCONNECTED))
+        previous?.mediaResponse = null
     }
 
     override fun close() {
@@ -161,6 +198,7 @@ class CameraClient(
 
     private suspend fun runSession(current: Session) {
         var failure: String? = null
+        var mediaFailure = CameraMediaError.DISCONNECTED
         try {
             val socket = current.factory.createSocket()
             synchronized(lock) {
@@ -177,21 +215,26 @@ class CameraClient(
             val output = socket.getOutputStream()
             val framer = JsonObjectFramer()
             val bytes = ByteArray(4096)
-            val pending = mutableMapOf<Int, Long>()
-            val queue = ArrayDeque<Int>()
+            val pending = mutableMapOf<Int, Pair<Long, Outbound>>()
+            val queue = ArrayDeque<Outbound>()
             var token: Int? = null
             var actionRecordingRevision = 0L
             var configRecordingRevision = 0L
             var actionConfigRevision: Long? = null
 
             fun publishPending() = update(current) {
-                it.copy(pending = pending.keys + queue + current.reservedCommands)
+                it.copy(pending = pending.keys + queue.map { command -> command.id } + current.reservedCommands)
             }
 
-            fun send(id: Int) {
+            fun send(command: Outbound) {
+                val id = command.id
                 check(pending.isEmpty()) { "Solo se permite una petición en vuelo" }
-                val request = CameraRequest(id, if (id == LOGIN) 0 else checkNotNull(token))
-                val raw = cameraJson.encodeToString(request)
+                val request = buildJsonObject {
+                    put("msg_id", id)
+                    put("token", if (id == LOGIN) 0 else checkNotNull(token))
+                    command.extras.forEach { (key, value) -> put(key, value) }
+                }
+                val raw = request.toString()
                 update(current) {
                     if (id == CameraCommand.STOP_PREVIEW && current.stopConfirmation != null)
                         current.stopConfirmationArmed = true
@@ -208,19 +251,19 @@ class CameraClient(
                 output.write(raw.toByteArray(Charsets.UTF_8))
                 output.flush()
                 update(current) { diagnostics.sent(id); it }
-                pending[id] = System.nanoTime()
+                pending[id] = System.nanoTime() to command
                 publishPending()
             }
 
             fun enqueueQueries() {
                 if (pending.isNotEmpty() || queue.isNotEmpty()) return
-                queue.addLast(GET_BATTERY)
-                queue.addLast(GET_CONFIG)
+                queue.addLast(Outbound(GET_BATTERY))
+                queue.addLast(Outbound(GET_CONFIG))
                 publishPending()
             }
 
             update(current) { it.copy(connection = ConnectionStatus.AUTHENTICATING) }
-            send(LOGIN)
+            send(Outbound(LOGIN))
             while (currentCoroutineContext().isActive) {
                 synchronized(lock) {
                     current.commands.tryReceive().getOrNull()?.let { commands ->
@@ -230,7 +273,7 @@ class CameraClient(
                 }
                 if (pending.isEmpty() && queue.isNotEmpty()) send(queue.removeFirst())
                 val expired = pending.entries.firstOrNull {
-                    (System.nanoTime() - it.value) / 1_000_000 >= responseTimeoutMillis
+                    (System.nanoTime() - it.value.first) / 1_000_000 >= responseTimeoutMillis
                 }
                 if (expired != null) {
                     update(current) { diagnostics.append("TIMEOUT", "msg_id=${expired.key}"); it }
@@ -251,7 +294,6 @@ class CameraClient(
                     val raw = Charsets.UTF_8.newDecoder().decode(
                         ByteBuffer.wrap(frame.toByteArray(Charsets.ISO_8859_1)),
                     ).toString()
-                    update(current) { it.copy(lastMessage = redactCameraJson(raw)) }
                     val message = cameraJson.decodeFromString<CameraMessage>(raw)
                     update(current) { diagnostics.received(message); it }
                     synchronized(lock) {
@@ -260,6 +302,7 @@ class CameraClient(
                             if (message.type == "start_video_record") current.stopConfirmation?.complete(false)
                         }
                     }
+                    val pendingCommand = pending[message.messageId]?.second
                     val completesRequest = message.messageId != EVENT && message.rval != null &&
                             message.messageId in pending
                     if (message.messageId == LOGIN && LOGIN in pending) {
@@ -305,17 +348,31 @@ class CameraClient(
                                     next = next.copy(recording = RecordingState.UNKNOWN)
                                 }
                                 actionConfigRevision = actionRecordingRevision
-                                queue.addLast(GET_CONFIG)
+                                queue.addLast(Outbound(GET_CONFIG))
                             }
                             next = next.copy(pendingAction = null)
                         }
-                        next.copy(pending = pending.keys + queue + current.reservedCommands)
+                        next.copy(pending = pending.keys + queue.map { command -> command.id } + current.reservedCommands)
+                    }
+                    if (completesRequest) synchronized(lock) {
+                        val response = pendingCommand?.response
+                        if (response != null) {
+                            if (current.mediaResponse === response) current.mediaResponse = null
+                            // State must be idle before a resumed caller submits total/free or CD/LIST.
+                            if (session === current) response.complete(message)
+                            else response.completeExceptionally(CameraMediaException(CameraMediaError.DISCONNECTED))
+                        }
                     }
                 }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (exception: Exception) {
+            mediaFailure = when (exception) {
+                is SocketTimeoutException -> CameraMediaError.TIMEOUT
+                is kotlinx.serialization.SerializationException -> CameraMediaError.PROTOCOL
+                else -> CameraMediaError.DISCONNECTED
+            }
             update(current) { diagnostics.tcpFailure(exception); it }
             // Serialization errors can embed the full incoming JSON, including Wi-Fi credentials.
             failure = if (exception is kotlinx.serialization.SerializationException) "Respuesta JSON no válida"
@@ -340,6 +397,8 @@ class CameraClient(
                         lastEvent = previous.lastEvent,
                     )
                 }
+                current.mediaResponse?.completeExceptionally(CameraMediaException(mediaFailure))
+                current.mediaResponse = null
             }
         }
     }

@@ -36,6 +36,22 @@ class CameraConnectionService : Service() {
         tcpState = { cameraState.value }, connectTcp = { client.connect(it) },
         disconnectTcp = { client.disconnect() }, diagnostic = { diagnostics.append("TCP", it) },
     )
+    private val media = CameraMediaRepository(
+        scope, client::requestMedia, ::mediaAvailability, client::sessionIdentity,
+        diagnostic = { diagnostics.append("MEDIA", it) },
+    )
+    val mediaState = media.state
+
+    private fun mediaAvailability(): CameraMediaError? = mediaAvailability(
+        active.value, wifiStatus.value.state == CameraWifiState.BLOCKED, cameraState.value,
+    )
+
+    fun setMediaForeground(foreground: Boolean) = media.setForeground(foreground)
+    fun openMedia() = media.open()
+    fun refreshMedia() = media.refresh()
+    fun openMediaDirectory(path: String) = media.openDirectory(path)
+    fun mediaParent() = media.parent()
+    fun mediaRoot() = media.root()
 
     inner class LocalBinder : Binder() {
         val service: CameraConnectionService get() = this@CameraConnectionService
@@ -69,6 +85,7 @@ class CameraConnectionService : Service() {
         }
         scope.launch {
             cameraState.collect {
+                if (it.connection == ConnectionStatus.DISCONNECTED) media.onDisconnected()
                 if (active.value) {
                     recovery.tcp(it)
                     updateNotification()
@@ -207,6 +224,7 @@ class CameraConnectionService : Service() {
         cleaning = true
         try {
             awaitingCredentials?.cancel(); awaitingCredentials = null
+            media.reset()
             previewClients.values.toList().forEach { it(networkLost) }
             recovery.clear()
             if (releaseWifi) {

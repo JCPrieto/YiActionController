@@ -10,6 +10,9 @@ object CameraCommand {
     const val EVENT = 7
     const val START_PREVIEW = 259
     const val STOP_PREVIEW = 260
+    const val GET_STORAGE = 5
+    const val LIST_DIRECTORY = 1282
+    const val CHANGE_DIRECTORY = 1283
 }
 
 data class CameraControlResult(val accepted: Boolean, val error: String? = null, val rval: Int? = null)

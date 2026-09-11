@@ -742,3 +742,101 @@ Verificación local requerida:
 ```sh
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
 ```
+
+## Hito 5A — exploración read-only de microSD
+
+### Validado físicamente
+
+Los hitos 1–4B y las pruebas del plan 4B fueron superados con la cámara real,
+según confirmación del usuario. El experimento 5.0 validó estos comandos con
+token dinámico en la YDXJ01XY / YDXJ_v23L / YDXJv25L_1.5.12:
+
+| Operación               | Comando validado                                       |
+|-------------------------|--------------------------------------------------------|
+| Capacidad total / libre | `msg_id=5 type="total"` / `type="free"`                |
+| Directorio actual       | `msg_id=1283 param="."`                                |
+| Raíz SD                 | `msg_id=1283 param="/tmp/fuse_d"`                      |
+| Entrar en directorios   | `msg_id=1283 param="DCIM/"` y `"100MEDIA/"`            |
+| Subir                   | `msg_id=1283 param="../"`                              |
+| Listar                  | `msg_id=1282 param=" -D -S"` (incluye espacio inicial) |
+
+Estructura observada, no impuesta a otras cámaras ni tarjetas:
+
+```text
+/tmp/fuse_d
+├── MISC
+└── DCIM
+    └── 100MEDIA
+```
+
+Cada elemento del array listing tiene una propiedad:
+`filename -> "<bytes> bytes|yyyy-MM-dd HH:mm:ss"`.
+Los directorios se reconocen por la barra final, no por tamaño cero.
+JPG/JPEG, MP4 y THM se clasifican sin distinguir mayúsculas; se conservan OTHER
+y las entradas con metadatos incompletos. MP4/THM se asocian por basename
+case-insensitive en el mismo directorio. Un MP4 sin THM sigue siendo válido.
+
+Los valores de capacidad brutos observados (31154688 total y 29852096 libres)
+se interpretan como **KiB por la prueba física**, no como bytes del protocolo.
+La conversión centralizada multiplica por 1024 y rechaza negativos, overflow o
+libre mayor que total. La UI muestra GiB/MiB. Conservamos timestampRaw:
+hay fechas de 2008 y 2023 y no representan una cronología fiable.
+
+### Implementado / pendiente de prueba física de la UI 5A
+
+La sección **Medios**, separada de Control, consulta total/free y abre DCIM
+sin asumir el nombre de su subdirectorio. Ofrece Subir, Raíz SD y Actualizar.
+Actualizar consulta capacidad, verifica el directorio actual y vuelve a listar,
+sin cambiarlo. La raíz permitida es exclusivamente `/tmp/fuse_d`; las rutas
+de UI y los nombres recibidos se validan antes de utilizarlos.
+
+CameraConnectionService conserva el repositorio y su estado en memoria.
+Se utiliza su único CameraClient, token, lector JSON y política de una petición
+TCP en vuelo. Cada operación tiene argumentos y finalización propios aunque
+comparta msg_id. No existe otro socket/cliente/cola TCP para la galería.
+Rotar conserva pantalla y directorio. Abrir Medios no inicia ni detiene preview;
+se puede listar durante grabación si la cámara acepta los comandos.
+
+Al salir a background se deja terminar la petición actual, pero se corta la
+secuencia antes de enviar otra. Un LIST ya enviado conserva su resultado.
+No hay polling, navegación automática al volver ni sincronización automática.
+Los errores de red, SD, timeout, rval, formato y rutas se muestran sin volcar
+el listado completo al diagnóstico. El orden es por nombre descendente,
+no cronológico; los directorios aparecen primero.
+
+Solo hay iconos genéricos: la asociación THM es metadato, **no descarga**.
+No se implementan descarga, reproducción de archivos, borrado, escritura,
+miniaturas remotas, persistencia ni ninguna funcionalidad 5B.
+
+### Cubierto por tests
+
+Fixtures físicas sanitizadas, clasificación y metadatos inválidos, asociación
+opcional MP4/THM, límites de navegación y conversión segura de capacidad.
+Repositorio: carga inicial, refresh sin cambio de directorio, vuelta a raíz,
+duplicados, reobservación sin recarga, finalización en background y rechazo
+de resultados de sesiones antiguas. Servidor TCP local: argumentos exactos,
+tokens dinámicos nuevos, msg_id repetidos, eventos intercalados, exclusión de
+peticiones, cancelación del consumidor, rval=-4, timeout y desconexión.
+Se ejecuta además la regresión de los hitos anteriores.
+
+### Prueba física pendiente — Hito 5A
+
+1. Conectar la cámara desde YiActionController.
+2. Abrir Medios.
+3. Comprobar capacidad total/libre.
+4. Comprobar DCIM (destino inicial; desde Raíz SD puede abrirse de nuevo).
+5. Abrir 100MEDIA o el directorio presente en la tarjeta.
+6. Verificar JPG/MP4.
+7. Comprobar tamaños.
+8. Comprobar que THM asociado no aparece como vídeo separado.
+9. Volver a DCIM.
+10. Volver a Raíz SD.
+11. Comprobar que no se puede subir por encima de /tmp/fuse_d.
+12. Actualizar listado.
+13. Rotar el teléfono.
+14. Comprobar conexión y pantalla coherentes.
+15. Volver a Control.
+16. Comprobar preview, foto y grabación; repetir listado con preview/grabación.
+
+No borrar ni descargar nada. La validación del protocolo 5.0 no sustituye esta
+prueba de integración de la nueva pantalla.

@@ -8,6 +8,7 @@ import android.net.Network
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -95,13 +96,36 @@ class MainActivity : ComponentActivity() {
                 val permissionPending by model.permissionPending.collectAsStateWithLifecycle()
                 val serviceActive by model.serviceActive.collectAsStateWithLifecycle()
                 val connectionError by model.connectionError.collectAsStateWithLifecycle()
-                Diagnostics(
-                    state, ::connectCamera, model::disconnect, model::refresh,
-                    model::takePhoto, model::startRecording, model::stopRecording,
-                    preview, player, network != null, model::startPreview, model::stopPreview,
-                    history, model::clearDiagnosticHistory, model::restartPreview, wifi, permissionPending,
-                    serviceActive, connectionError, model::retryTcp
-                )
+                val screen by model.screen.collectAsStateWithLifecycle()
+                val media by model.mediaState.collectAsStateWithLifecycle()
+                BackHandler(screen == CameraScreen.MEDIA) { model.showControl() }
+                Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        FilterChip(
+                            selected = screen == CameraScreen.CONTROL,
+                            onClick = model::showControl,
+                            label = { Text("Control") })
+                        FilterChip(
+                            selected = screen == CameraScreen.MEDIA,
+                            onClick = model::showMedia,
+                            label = { Text("Medios") })
+                    }
+                    Box(Modifier.weight(1f)) {
+                        if (screen == CameraScreen.MEDIA) CameraMediaScreen(
+                            media, state, serviceActive, wifi.state == CameraWifiState.BLOCKED,
+                            model::refreshMedia, model::openMediaDirectory, model::mediaParent, model::mediaRoot,
+                        ) else Diagnostics(
+                            state, ::connectCamera, model::disconnect, model::refresh,
+                            model::takePhoto, model::startRecording, model::stopRecording,
+                            preview, player, network != null, model::startPreview, model::stopPreview,
+                            history, model::clearDiagnosticHistory, model::restartPreview, wifi, permissionPending,
+                            serviceActive, connectionError, model::retryTcp, media.loading,
+                        )
+                    }
+                }
             }
         }
     }
@@ -130,6 +154,7 @@ private fun Diagnostics(
     serviceActive: Boolean,
     connectionError: String?,
     retryTcp: () -> Unit,
+    mediaBusy: Boolean,
 ) {
     // Deliberately not rememberSaveable: credentials never enter saved instance state.
     var ssid by remember { mutableStateOf("") }
@@ -138,7 +163,7 @@ private fun Diagnostics(
     val wifiActive = permissionPending || serviceActive || wifi.state in setOf(
         CameraWifiState.REQUESTING, CameraWifiState.CONNECTING, CameraWifiState.CONNECTED, CameraWifiState.BLOCKED
     )
-    val controlAvailable = wifi.state != CameraWifiState.BLOCKED
+    val controlAvailable = wifi.state != CameraWifiState.BLOCKED && !mediaBusy
     Scaffold { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
@@ -146,8 +171,9 @@ private fun Diagnostics(
         ) {
             Text("Cámara YI", style = MaterialTheme.typography.headlineMedium)
             Text("Servicio de conexión: " + if (serviceActive) "Activo" else "Inactivo")
+            if (mediaBusy) Text("Consulta de medios en curso…")
             connectionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            if (!controlAvailable) Text("Android ha bloqueado temporalmente el acceso a la red de la cámara.")
+            if (wifi.state == CameraWifiState.BLOCKED) Text("Android ha bloqueado temporalmente el acceso a la red de la cámara.")
             if (automaticWifi) {
                 if (!wifiActive) {
                     OutlinedTextField(

@@ -16,6 +16,8 @@ internal data class CameraMessage(
     val rval: Int? = null,
     val type: String? = null,
     val param: JsonElement? = null,
+    val pwd: JsonElement? = null,
+    val listing: JsonElement? = null,
 )
 
 internal val cameraJson = Json { ignoreUnknownKeys = true }
@@ -66,7 +68,11 @@ data class CameraState(
 }
 
 internal fun CameraState.applyMessage(message: CameraMessage, raw: String): CameraState {
-    val safeRaw = redactCameraJson(raw)
+    val safeRaw = if (message.messageId == CameraCommand.LIST_DIRECTORY) buildJsonObject {
+        put("msg_id", message.messageId)
+        message.rval?.let { put("rval", it) }
+        put("list_entries", (message.listing as? JsonArray)?.size ?: -1)
+    }.toString() else redactCameraJson(raw)
     var next = copy(lastMessage = safeRaw)
     if (message.rval != null && message.rval != 0) {
         return next.copy(error = "Comando ${message.messageId}: rval=${message.rval}")

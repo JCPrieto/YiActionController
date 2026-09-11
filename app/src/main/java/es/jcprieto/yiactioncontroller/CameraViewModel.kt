@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
+enum class CameraScreen { CONTROL, MEDIA }
+
 @OptIn(ExperimentalCoroutinesApi::class)
 @UnstableApi
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
@@ -24,6 +26,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val service = MutableStateFlow<CameraConnectionService?>(null)
     private var bound = false
     private var connectJob: Job? = null
+    private var foreground = false
+    private val mutableScreen = MutableStateFlow(CameraScreen.CONTROL)
+    val screen = mutableScreen.asStateFlow()
 
     // Memory only, never SavedState or StateFlow; cleared immediately after Binder delivery.
     private var pendingSsid: String? = null
@@ -42,6 +47,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         .stateIn(viewModelScope, SharingStarted.Eagerly, CameraWifiStatus())
     val serviceActive = service.flatMapLatest { it?.active ?: flowOf(false) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val mediaState = service.flatMapLatest { it?.mediaState ?: flowOf(CameraMediaBrowserState()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, CameraMediaBrowserState())
     val diagnosticHistory = service.flatMapLatest { it?.diagnostics?.entries ?: flowOf(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val cameraNetwork = wifiStatus.map { it.network }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -64,6 +71,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             val connected = (binder as CameraConnectionService.LocalBinder).service
             service.value = connected
+            connected.setMediaForeground(foreground)
             connected.attachPreview(this@CameraViewModel) { lost ->
                 if (lost) preview.networkLost() else preview.cameraDisconnected()
             }
@@ -113,6 +121,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun unbind() {
+        service.value?.setMediaForeground(false)
         service.value?.detachPreview(this)
         if (bound) {
             bound = false; app.unbindService(connection)
@@ -208,15 +217,44 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun onBackground() {
+        foreground = false
+        service.value?.setMediaForeground(false)
         log("APP", "Segundo plano: detener preview"); preview.stop()
     }
 
     fun onForeground() {
+        foreground = true
+        service.value?.setMediaForeground(true)
         log("APP", "Primer plano: Wi-Fi=${wifiStatus.value.state} TCP=${state.value.connection}")
     }
 
     fun refresh() {
         log("UI", "Consultar batería y configuración"); service.value?.refresh()
+    }
+
+    fun showControl() {
+        mutableScreen.value = CameraScreen.CONTROL
+    }
+
+    fun showMedia() {
+        mutableScreen.value = CameraScreen.MEDIA
+        service.value?.openMedia()
+    }
+
+    fun refreshMedia() {
+        service.value?.refreshMedia()
+    }
+
+    fun openMediaDirectory(path: String) {
+        service.value?.openMediaDirectory(path)
+    }
+
+    fun mediaParent() {
+        service.value?.mediaParent()
+    }
+
+    fun mediaRoot() {
+        service.value?.mediaRoot()
     }
 
     fun takePhoto() {
