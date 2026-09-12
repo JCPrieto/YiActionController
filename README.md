@@ -867,12 +867,11 @@ El md5sum del evento tiene semántica no confirmada: no coincidió con el MD5
 de los fragmentos aun cuando la reconstrucción fue correcta. No se usa para
 validación; el diagnóstico solo informa de su presencia.
 
-### Implementado — A–H validadas físicamente; incidencia de notificación en seguimiento
+### Implementado y validado físicamente — A–H + cancelación desde notificación
 
 El usuario comunica que todas las pruebas físicas A–H han sido superadas.
-Cancelar desde la aplicación y Desconectar desde la notificación funcionan.
-Se detectó una incidencia adicional: «Cancelar descarga» desde la notificación
-no produce efecto. No se considera validada esa acción hasta repetirla.
+Cancelar desde la aplicación, Cancelar descarga desde la notificación y
+Desconectar desde la notificación funcionan correctamente.
 
 Se limita la actualización del progreso de la notificación a una vez por segundo,
 sin republicar porcentajes idénticos. Los cambios de estado/acciones son inmediatos.
@@ -882,10 +881,10 @@ frecuentes
 ([documentación de notificaciones](https://developer.android.com/develop/ui/compose/notifications/create-notification)).
 El servicio registra «DOWNLOAD Cancelar recibido desde notificación; estado=…»
 antes de llamar a la misma cancelación utilizada por la UI.
-Pendiente: durante un MP4, cancelar desde la notificación con la app en segundo
-plano; comprobar esa entrada, cierre de 8787, parcial reanudable y Wi-Fi/TCP vivos.
-Si la pulsación sigue sin efecto, copiar el diagnóstico para distinguir entrega
-de la acción frente a ejecución de la cancelación.
+La cancelación desde la notificación se comprobó durante una descarga con la app
+en segundo plano: se conserva el parcial reanudable, se cierra 8787 y permanecen
+vivos Wi-Fi y TCP de control. El diagnóstico de recepción de la acción queda
+disponible para futuras regresiones.
 
 CameraConnectionService posee CameraMediaDownloader. La UI observa su estado;
 rotación, Home o abrir otra app no cancelan la transferencia. Se conserva el
