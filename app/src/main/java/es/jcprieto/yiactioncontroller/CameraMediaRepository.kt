@@ -150,6 +150,13 @@ internal class CameraMediaRepository(
         mutableState.value = CameraMediaBrowserState()
     }
 
+    /** A resumed transfer may select a different directory from the one currently displayed. */
+    fun workingDirectoryChanged(path: String) {
+        if (state.value.currentPath != path) mutableState.value = state.value.copy(
+            currentPath = path, entries = emptyList(), gallery = emptyList(), hasListing = false, malformedEntries = 0,
+        )
+    }
+
     private fun showError(error: CameraMediaException) {
         val previous = if (sessionIdentity() == null || error.kind in setOf(
                 CameraMediaError.DISCONNECTED,

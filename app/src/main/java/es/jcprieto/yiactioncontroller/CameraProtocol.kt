@@ -18,6 +18,8 @@ internal data class CameraMessage(
     val param: JsonElement? = null,
     val pwd: JsonElement? = null,
     val listing: JsonElement? = null,
+    val size: JsonElement? = null,
+    @SerialName("rem_size") val remaining: JsonElement? = null,
 )
 
 internal val cameraJson = Json { ignoreUnknownKeys = true }

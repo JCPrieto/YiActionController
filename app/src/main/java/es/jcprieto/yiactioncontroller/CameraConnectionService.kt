@@ -12,6 +12,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import java.io.File
 
 /** Started + locally bound. Owns the camera connection, never the player or UI. */
 class CameraConnectionService : Service() {
@@ -31,20 +32,85 @@ class CameraConnectionService : Service() {
     private var awaitingCredentials: Job? = null
     private var cleaning = false
     private val previewClients = mutableMapOf<Any, (Boolean) -> Unit>()
+    private val previewStoppers = mutableMapOf<Any, suspend () -> Boolean>()
+    private var explicitDownloadPending = false
+    private val attemptedThumbnails = mutableSetOf<String>()
+    private val downloader: CameraMediaDownloader by lazy {
+        CameraMediaDownloader(
+            scope, client, { recovery.binding?.socketFactory },
+            { File(filesDir, "yi-transfers") }, AndroidMediaPublisher(this), ::downloadAvailability,
+            preparePreview = {
+                if (previewStoppers.isEmpty()) !cameraState.value.previewControlRequested
+                else previewStoppers.values.toList().all { it() }
+            },
+            diagnostic = { diagnostics.append("DOWNLOAD", it) },
+            directoryChanged = { media.workingDirectoryChanged(it) },
+        )
+    }
+    val downloadStatus get() = downloader.status
+    private val mutableUserDownload = MutableStateFlow(CameraDownloadStatus())
+    val userDownload = mutableUserDownload.asStateFlow()
+    val thumbnails get() = downloader.thumbnails
     private val recovery = CameraSessionRecovery<Network>(
         createBinding = { network -> CameraNetworkBinding(network, network.socketFactory) { network.bindSocket(it) } },
         tcpState = { cameraState.value }, connectTcp = { client.connect(it) },
         disconnectTcp = { client.disconnect() }, diagnostic = { diagnostics.append("TCP", it) },
     )
     private val media = CameraMediaRepository(
-        scope, client::requestMedia, ::mediaAvailability, client::sessionIdentity,
+        scope, { client.requestMedia(it) }, ::mediaAvailability, client::sessionIdentity,
         diagnostic = { diagnostics.append("MEDIA", it) },
     )
     val mediaState = media.state
 
-    private fun mediaAvailability(): CameraMediaError? = mediaAvailability(
-        active.value, wifiStatus.value.state == CameraWifiState.BLOCKED, cameraState.value,
-    )
+    private fun mediaAvailability(): CameraMediaError? =
+        if (downloader.busy || explicitDownloadPending) CameraMediaError.BUSY else mediaAvailability(
+            active.value, wifiStatus.value.state == CameraWifiState.BLOCKED, cameraState.value,
+        )
+
+    private fun downloadAvailability(): CameraDownloadError? = when {
+        wifiStatus.value.state == CameraWifiState.BLOCKED -> CameraDownloadError.NETWORK_BLOCKED
+        !active.value || recovery.binding == null || cameraState.value.connection != ConnectionStatus.CONNECTED ->
+            CameraDownloadError.NETWORK_LOST
+
+        media.state.value.loading || !cameraState.value.canSendCommand -> CameraDownloadError.BUSY
+        cameraState.value.recording != RecordingState.IDLE -> CameraDownloadError.NOT_IDLE
+        else -> null
+    }
+
+    fun download(entry: CameraMediaEntry) {
+        if (explicitDownloadPending || downloader.busy && !downloader.status.value.thumbnail) return
+        explicitDownloadPending = true
+        scope.launch {
+            try {
+                downloader.preemptThumbnail()
+                withTimeoutOrNull(6_000) {
+                    cameraState.first { it.canSendCommand || it.connection == ConnectionStatus.DISCONNECTED }
+                }
+                if (!downloader.status.value.thumbnail && downloader.status.value.canResume) return@launch
+                if (downloader.status.value.thumbnail) downloader.discard()
+                downloader.start(entry)
+            } finally {
+                explicitDownloadPending = false
+            }
+        }
+    }
+
+    fun resumeDownload() {
+        if (!explicitDownloadPending) downloader.resume()
+    }
+
+    fun cancelDownload() = downloader.cancel()
+    fun discardDownload() = downloader.discard()
+    fun loadThumbnail(entry: CameraMediaEntry) {
+        if (downloader.busy || explicitDownloadPending || downloader.status.value.canResume ||
+            media.state.value.loading || cameraState.value.previewControlRequested || downloadAvailability() != null ||
+            entry.type != CameraMediaType.THUMBNAIL || (entry.sizeBytes ?: Long.MAX_VALUE) > 8 * 1024 * 1024
+        ) return
+        val key = thumbnailKey(entry)
+        if (key in thumbnails.value || !attemptedThumbnails.add(key)) return
+        if (attemptedThumbnails.size > 256) attemptedThumbnails.remove(attemptedThumbnails.first())
+        downloader.start(entry)
+    }
 
     fun setMediaForeground(foreground: Boolean) = media.setForeground(foreground)
     fun openMedia() = media.open()
@@ -59,6 +125,18 @@ class CameraConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // No persisted resume metadata: remove only files created in our dedicated temporary directory.
+        File(filesDir, "yi-transfers").listFiles()
+            ?.filter { it.isFile && it.name.startsWith("yi-") && it.extension == "part" }
+            ?.forEach { it.delete() }
+        scope.launch {
+            downloadStatus.collect {
+                if (!it.thumbnail) mutableUserDownload.value = it
+                else if (it.state == CameraDownloadState.COMPLETED)
+                    attemptedThumbnails.remove(it.remotePath + "|" + it.totalBytes)
+                updateNotification()
+            }
+        }
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "Conexión con cámara YI", NotificationManager.IMPORTANCE_LOW)
         )
@@ -69,6 +147,7 @@ class CameraConnectionService : Service() {
             scope.launch {
                 wifi!!.status.collect { status ->
                     mutableWifi.value = status
+                    if (status.state == CameraWifiState.BLOCKED) downloader.cancel(CameraDownloadError.NETWORK_BLOCKED)
                     if (active.value && !cleaning) {
                         recovery.network(status)
                         if (status.state in setOf(
@@ -85,7 +164,13 @@ class CameraConnectionService : Service() {
         }
         scope.launch {
             cameraState.collect {
-                if (it.connection == ConnectionStatus.DISCONNECTED) media.onDisconnected()
+                if (it.connection == ConnectionStatus.DISCONNECTED) {
+                    media.onDisconnected()
+                    downloader.cancel(
+                        if (wifiStatus.value.state == CameraWifiState.BLOCKED)
+                            CameraDownloadError.NETWORK_BLOCKED else CameraDownloadError.NETWORK_LOST
+                    )
+                }
                 if (active.value) {
                     recovery.tcp(it)
                     updateNotification()
@@ -96,6 +181,7 @@ class CameraConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_CANCEL_DOWNLOAD -> cancelDownload()
             ACTION_DISCONNECT -> disconnect()
             ACTION_CONNECT -> {
                 if (!active.value) {
@@ -147,6 +233,11 @@ class CameraConnectionService : Service() {
 
     internal fun detachPreview(owner: Any) {
         previewClients.remove(owner)
+        previewStoppers.remove(owner)
+    }
+
+    internal fun attachDownloadPreparation(owner: Any, stop: suspend () -> Boolean) {
+        previewStoppers[owner] = stop
     }
 
     fun connect(ssid: String, password: String) {
@@ -180,9 +271,19 @@ class CameraConnectionService : Service() {
     internal fun currentPreviewTransport(): PreviewTransport? =
         if (active.value && wifiStatus.value.state == CameraWifiState.CONNECTED) recovery.binding?.previewTransport else null
 
-    private fun canControl() = active.value && wifiStatus.value.state != CameraWifiState.BLOCKED
+    private fun canControl() =
+        active.value && wifiStatus.value.state != CameraWifiState.BLOCKED && !downloader.busy && !explicitDownloadPending
     fun retryTcp() {
-        if (canControl()) recovery.retry()
+        if (!canControl()) return
+        if (client.hasTransferBarrier()) {
+            val factory = recovery.binding?.socketFactory ?: return
+            diagnostics.append(
+                "DOWNLOAD",
+                "Reinicio TCP solicitado para liberar confirmación pendiente; parcial conservado"
+            )
+            client.disconnect()
+            client.connect(factory)
+        } else recovery.retry()
     }
 
     fun refresh() {
@@ -205,11 +306,14 @@ class CameraConnectionService : Service() {
         if (canControl()) client.startPreview() else unavailableControl()
 
     suspend fun stopPreview(): CameraControlResult {
-        if (!canControl()) return unavailableControl()
+        // Cleanup is allowed during PREPARING; manual controls remain disabled.
+        fun mayStop() = active.value && wifiStatus.value.state != CameraWifiState.BLOCKED &&
+                (!downloader.busy || downloadStatus.value.state == CameraDownloadState.PREPARING)
+        if (!mayStop()) return unavailableControl()
         val available = withTimeoutOrNull(6_000) {
             cameraState.first { it.canSendCommand || it.connection == ConnectionStatus.DISCONNECTED }
         }
-        return if (canControl() && available?.canSendCommand == true) client.stopPreview() else unavailableControl()
+        return if (mayStop() && available?.canSendCommand == true) client.stopPreview() else unavailableControl()
     }
 
     suspend fun stopPreviewAndAwaitVfStop(): CameraControlResult =
@@ -224,6 +328,8 @@ class CameraConnectionService : Service() {
         cleaning = true
         try {
             awaitingCredentials?.cancel(); awaitingCredentials = null
+            if (networkLost) downloader.cancel(CameraDownloadError.NETWORK_LOST) else downloader.shutdown()
+            attemptedThumbnails.clear()
             media.reset()
             previewClients.values.toList().forEach { it(networkLost) }
             recovery.clear()
@@ -254,17 +360,35 @@ class CameraConnectionService : Service() {
             this, 1,
             Intent(this, CameraConnectionService::class.java).setAction(ACTION_DISCONNECT), flags
         )
-        return NotificationCompat.Builder(this, CHANNEL)
+        val builder = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_camera_connection)
             .setContentTitle("Conexión con cámara YI").setContentText(text)
             .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .addAction(0, "Desconectar", disconnect).build()
+            .addAction(0, "Desconectar", disconnect)
+        if (downloadStatus.value.busy) {
+            val cancel = PendingIntent.getService(
+                this, 2,
+                Intent(this, CameraConnectionService::class.java).setAction(ACTION_CANCEL_DOWNLOAD), flags
+            )
+            builder.setProgress(
+                100,
+                downloadStatus.value.percent,
+                downloadStatus.value.state == CameraDownloadState.PREPARING
+            )
+            if (downloadStatus.value.state != CameraDownloadState.PUBLISHING) builder.addAction(
+                0,
+                "Cancelar descarga",
+                cancel
+            )
+        }
+        return builder.build()
     }
 
     private fun updateNotification() {
         if (!active.value) return
         val text = when {
+            downloadStatus.value.busy -> "Descargando " + downloadStatus.value.fileName + " · " + downloadStatus.value.percent + " %"
             wifiStatus.value.state == CameraWifiState.BLOCKED -> "Conexión con cámara temporalmente bloqueada"
             cameraState.value.connection == ConnectionStatus.CONNECTED -> "YI Action Camera conectada"
             cameraState.value.error != null -> "Sesión TCP desconectada; abre la app para reintentar"
@@ -281,12 +405,14 @@ class CameraConnectionService : Service() {
     override fun onDestroy() {
         terminate(releaseWifi = true)
         previewClients.clear()
+        previewStoppers.clear()
         client.close()
         scope.cancel()
         super.onDestroy()
     }
 
     companion object {
+        const val ACTION_CANCEL_DOWNLOAD = "es.jcprieto.yiactioncontroller.CANCEL_DOWNLOAD"
         const val ACTION_CONNECT = "es.jcprieto.yiactioncontroller.CONNECT"
         const val ACTION_DISCONNECT = "es.jcprieto.yiactioncontroller.DISCONNECT"
         private const val CHANNEL = "camera_connection"

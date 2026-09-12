@@ -3,10 +3,16 @@ package es.jcprieto.yiactioncontroller
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import java.util.*
 
 @Composable
@@ -19,17 +25,55 @@ internal fun CameraMediaScreen(
     openDirectory: (String) -> Unit,
     parent: () -> Unit,
     root: () -> Unit,
+    download: CameraDownloadStatus,
+    transferBusy: Boolean,
+    thumbnails: Map<String, String>,
+    startDownload: (CameraMediaEntry) -> Unit,
+    resumeDownload: () -> Unit,
+    cancelDownload: () -> Unit,
+    discardDownload: () -> Unit,
+    loadThumbnail: (CameraMediaEntry) -> Unit,
+    retryControl: () -> Unit,
 ) {
-    val available = serviceActive && camera.canSendCommand && !blocked && !state.loading
+    val available = serviceActive && camera.canSendCommand && !blocked && !state.loading && !transferBusy
+    val listState = rememberLazyListState()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(
+        state.gallery,
+        transferBusy,
+        thumbnails,
+        camera.canSendCommand,
+        camera.previewControlRequested,
+        lifecycle
+    ) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.key } }.collect { visible ->
+                if (!transferBusy && camera.recording == RecordingState.IDLE && !camera.previewControlRequested) {
+                    state.gallery.filter { it.media.path in visible }.forEach { item ->
+                        item.thumbnail?.takeIf { thumbnailKey(it) !in thumbnails }?.let(loadThumbnail)
+                    }
+                }
+            }
+        }
+    }
     Scaffold { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(padding),
+            state = listState,
             contentPadding = PaddingValues(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
                 Text("Medios de la cámara", style = MaterialTheme.typography.headlineMedium)
-                Text("Exploración de la microSD · solo lectura", style = MaterialTheme.typography.bodySmall)
+                Text("Medios de la microSD", style = MaterialTheme.typography.bodySmall)
+            }
+            item {
+                DownloadPanel(
+                    download, available && camera.recording == RecordingState.IDLE,
+                    resumeDownload, cancelDownload, discardDownload, retryControl
+                )
+                if (transferBusy && !download.busy) Text("Cargando miniatura")
+                if (camera.recording != RecordingState.IDLE) Text("Para descargar, detén la grabación y confirma el estado inactivo en Control.")
             }
             item {
                 Text("MicroSD", style = MaterialTheme.typography.titleLarge)
@@ -86,14 +130,20 @@ internal fun CameraMediaScreen(
                     Text("📁 ${entry.name.removeSuffix("/")}")
                 }
             }
-            items(state.gallery) { item ->
+            items(state.gallery, key = { it.media.path }) { item ->
                 OutlinedCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        ThumbnailImage(item.thumbnail?.let { thumbnails[thumbnailKey(it)] }, item.media.name)
                         Text(
                             if (item.media.type == CameraMediaType.PHOTO) "📷 Foto" else "🎬 Vídeo",
                             style = MaterialTheme.typography.labelLarge
                         )
                         Text(item.media.name, style = MaterialTheme.typography.titleMedium)
+                        Button(
+                            onClick = { startDownload(item.media) },
+                            enabled = serviceActive && !blocked && !state.loading && camera.recording == RecordingState.IDLE &&
+                                    !download.busy && !download.canResume && item.media.sizeBytes != null
+                        ) { Text("Descargar") }
                         Text(item.media.sizeBytes?.let(::formatMediaSize) ?: "Tamaño desconocido")
                         Text(item.media.timestampRaw ?: "Fecha sin datos", style = MaterialTheme.typography.bodySmall)
                         if (item.thumbnail != null) Text(

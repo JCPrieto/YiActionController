@@ -49,6 +49,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val mediaState = service.flatMapLatest { it?.mediaState ?: flowOf(CameraMediaBrowserState()) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, CameraMediaBrowserState())
+    val downloadStatus = service.flatMapLatest { it?.userDownload ?: flowOf(CameraDownloadStatus()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, CameraDownloadStatus())
+    val transferBusy = service.flatMapLatest { it?.downloadStatus?.map { status -> status.busy } ?: flowOf(false) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val thumbnails = service.flatMapLatest { it?.thumbnails ?: flowOf(emptyMap<String, String>()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
     val diagnosticHistory = service.flatMapLatest { it?.diagnostics?.entries ?: flowOf(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val cameraNetwork = wifiStatus.map { it.network }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -75,6 +81,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             connected.attachPreview(this@CameraViewModel) { lost ->
                 if (lost) preview.networkLost() else preview.cameraDisconnected()
             }
+            connected.attachDownloadPreparation(this@CameraViewModel) { preview.stopForDownload() }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -205,13 +212,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startPreview() {
+        if (transferBusy.value) return
         log("UI", "Iniciar vista previa"); preview.start(service.value?.currentPreviewTransport())
     }
 
     fun stopPreview() {
+        if (transferBusy.value) return
         log("UI", "Detener vista previa"); preview.stop()
     }
     fun restartPreview() {
+        if (transferBusy.value) return
         log("UI", "Reiniciar vista previa: un intento 260 + vf_stop + 259")
         preview.restart(service.value?.currentPreviewTransport())
     }
@@ -243,6 +253,25 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refreshMedia() {
         service.value?.refreshMedia()
+    }
+    fun download(entry: CameraMediaEntry) {
+        service.value?.download(entry)
+    }
+
+    fun resumeDownload() {
+        service.value?.resumeDownload()
+    }
+
+    fun cancelDownload() {
+        service.value?.cancelDownload()
+    }
+
+    fun discardDownload() {
+        service.value?.discardDownload()
+    }
+
+    fun loadThumbnail(entry: CameraMediaEntry) {
+        if (foreground) service.value?.loadThumbnail(entry)
     }
 
     fun openMediaDirectory(path: String) {

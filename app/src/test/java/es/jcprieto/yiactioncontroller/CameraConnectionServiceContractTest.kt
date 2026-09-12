@@ -52,6 +52,16 @@ class CameraConnectionServiceContractTest {
         assertFalse(service.contains("Media3PreviewPlayer("))
         assertTrue(viewModel.contains("Media3PreviewPlayer("))
         assertFalse(service.contains("wifi?.fail(CameraWifiError.CAMERA_CONNECTION)"))
+        assertTrue(service.contains("CameraMediaDownloader("))
+        assertFalse(viewModel.contains("CameraMediaDownloader("))
+        assertFalse(viewModel.contains("8787"))
+        assertFalse(cleared.contains("cancelDownload"))
+        assertFalse(
+            viewModel.substringAfter("fun onBackground()").substringBefore("fun onForeground()")
+                .contains("cancelDownload")
+        )
+        assertTrue(service.contains("downloader.cancel(CameraDownloadError.NETWORK_BLOCKED)"))
+        assertTrue(service.contains("downloader.shutdown()"))
     }
 
     @Test

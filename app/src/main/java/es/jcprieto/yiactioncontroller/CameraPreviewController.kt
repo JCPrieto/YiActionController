@@ -159,6 +159,13 @@ class CameraPreviewController(
         mutableStatus.value = PreviewStatus(PreviewState.ERROR, "Cámara desconectada", PreviewError.CAMERA_DISCONNECTED)
     }
 
+    /** Used before a service-owned transfer; player ownership remains in the UI. */
+    suspend fun stopForDownload(): Boolean {
+        stop()
+        cleanup?.join()
+        return !cameraMayStream && !engineActive && !wanted && !mutableStatus.value.controlPending
+    }
+
     fun networkLost() {
         if (!wanted && !engineActive && !cameraMayStream && cleanup?.isActive != true) return
         // The transport is gone: no STOP can be delivered, and TCP EOF must not replace this cause.

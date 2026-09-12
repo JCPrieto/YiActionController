@@ -6,21 +6,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.Locale
 import kotlin.collections.ArrayDeque
-import kotlin.collections.List
-import kotlin.collections.Map
-import kotlin.collections.associateBy
-import kotlin.collections.component1
-import kotlin.collections.component2
-import kotlin.collections.contains
-import kotlin.collections.emptyList
-import kotlin.collections.filter
-import kotlin.collections.first
-import kotlin.collections.isNotEmpty
-import kotlin.collections.joinToString
-import kotlin.collections.map
-import kotlin.collections.mapOf
-import kotlin.collections.setOf
-import kotlin.collections.sortedByDescending
 
 const val CAMERA_SD_ROOT = "/tmp/fuse_d"
 internal const val CAMERA_DCIM_ROOT = "$CAMERA_SD_ROOT/DCIM"
@@ -194,6 +179,7 @@ internal sealed class CameraMediaOperation(val id: Int, val label: String) {
     data object Pwd : CameraMediaOperation(CameraCommand.CHANGE_DIRECTORY, "PWD")
     data class ChangeDirectory(val path: String) : CameraMediaOperation(CameraCommand.CHANGE_DIRECTORY, "CD")
     data object ListDirectory : CameraMediaOperation(CameraCommand.LIST_DIRECTORY, "LIST")
+    data class GetFile(val request: CameraFileRequest) : CameraMediaOperation(CameraCommand.GET_FILE, "GET_FILE")
 
     fun arguments(): Map<String, String> = when (this) {
         Total -> mapOf("type" to "total")
@@ -201,5 +187,10 @@ internal sealed class CameraMediaOperation(val id: Int, val label: String) {
         Pwd -> mapOf("param" to ".")
         is ChangeDirectory -> mapOf("param" to path)
         ListDirectory -> mapOf("param" to " -D -S")
+        is GetFile -> mapOf(
+            "param" to request.name,
+            "offset" to request.offset.toString(),
+            "fetch_size" to request.fetchSize.toString()
+        )
     }
 }

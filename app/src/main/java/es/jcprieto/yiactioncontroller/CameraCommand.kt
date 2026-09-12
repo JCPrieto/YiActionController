@@ -11,6 +11,7 @@ object CameraCommand {
     const val START_PREVIEW = 259
     const val STOP_PREVIEW = 260
     const val GET_STORAGE = 5
+    const val GET_FILE = 1285
     const val LIST_DIRECTORY = 1282
     const val CHANGE_DIRECTORY = 1283
 }

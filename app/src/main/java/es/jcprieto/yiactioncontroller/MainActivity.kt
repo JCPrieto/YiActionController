@@ -36,6 +36,33 @@ import androidx.media3.ui.PlayerView
 
 @UnstableApi
 class MainActivity : ComponentActivity() {
+    private var pendingDownload: CameraMediaEntry? = null
+    private val storagePermission =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            val granted = permissions.values.all { it }
+            val entry = pendingDownload
+            pendingDownload = null
+            if (granted && entry != null) model.download(entry)
+            else if (!granted) android.widget.Toast.makeText(
+                this,
+                "Permiso de almacenamiento denegado",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+
+    private fun download(entry: CameraMediaEntry) {
+        if (Build.VERSION.SDK_INT <= 28 && (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
+                    checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
+        ) {
+            pendingDownload = entry
+            storagePermission.launch(
+                arrayOf(
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                )
+            )
+        } else model.download(entry)
+    }
     private val model by lazy { ViewModelProvider(this)[CameraViewModel::class.java] }
     private val nearbyPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         model.permissionResult(hasWifiPermission())
@@ -98,6 +125,9 @@ class MainActivity : ComponentActivity() {
                 val connectionError by model.connectionError.collectAsStateWithLifecycle()
                 val screen by model.screen.collectAsStateWithLifecycle()
                 val media by model.mediaState.collectAsStateWithLifecycle()
+                val download by model.downloadStatus.collectAsStateWithLifecycle()
+                val transferBusy by model.transferBusy.collectAsStateWithLifecycle()
+                val thumbnails by model.thumbnails.collectAsStateWithLifecycle()
                 BackHandler(screen == CameraScreen.MEDIA) { model.showControl() }
                 Column(Modifier.fillMaxSize().statusBarsPadding()) {
                     Row(
@@ -117,12 +147,14 @@ class MainActivity : ComponentActivity() {
                         if (screen == CameraScreen.MEDIA) CameraMediaScreen(
                             media, state, serviceActive, wifi.state == CameraWifiState.BLOCKED,
                             model::refreshMedia, model::openMediaDirectory, model::mediaParent, model::mediaRoot,
+                            download, transferBusy, thumbnails, ::download, model::resumeDownload,
+                            model::cancelDownload, model::discardDownload, model::loadThumbnail, model::retryTcp,
                         ) else Diagnostics(
                             state, ::connectCamera, model::disconnect, model::refresh,
                             model::takePhoto, model::startRecording, model::stopRecording,
                             preview, player, network != null, model::startPreview, model::stopPreview,
                             history, model::clearDiagnosticHistory, model::restartPreview, wifi, permissionPending,
-                            serviceActive, connectionError, model::retryTcp, media.loading,
+                            serviceActive, connectionError, model::retryTcp, media.loading || transferBusy,
                         )
                     }
                 }

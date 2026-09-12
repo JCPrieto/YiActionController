@@ -39,6 +39,7 @@ class CameraClient(
 
         // Covers queued, in-flight and abandoned awaits until reply/terminal cleanup.
         var mediaResponse: CompletableDeferred<CameraMessage>? = null
+        var transfer: CameraTransferLease? = null
 
         // Guarded by lock; reserve immediately so rapid taps cannot queue multiple actions.
         var reservedCommands: Set<Int> = emptySet()
@@ -52,6 +53,32 @@ class CameraClient(
     val state = mutableState.asStateFlow()
 
     internal fun sessionIdentity(): Any? = synchronized(lock) { session }
+    internal fun hasTransferBarrier(): Boolean = synchronized(lock) {
+        session?.transfer?.let { it.released && it.armed && !it.terminal.isCompleted } == true
+    }
+
+    internal fun acquireTransfer(): CameraTransferLease = synchronized(lock) {
+        val current = session ?: throw DownloadException(CameraDownloadError.NETWORK_LOST)
+        current.transfer?.let {
+            if (!it.released || !it.terminal.isCompleted) throw DownloadException(CameraDownloadError.CONTROL_DRAIN)
+        }
+        if (!state.value.canSendCommand) throw DownloadException(CameraDownloadError.BUSY)
+        CameraTransferLease().also { current.transfer = it }
+    }
+
+    internal suspend fun awaitTransferDrain(): Boolean {
+        val previous = synchronized(lock) { session?.transfer }
+        if (previous == null || previous.terminal.isCompleted) return true
+        if (!previous.released) return false
+        return withTimeoutOrNull(5_000) { previous.terminal.await(); true } ?: false
+    }
+
+    internal fun releaseTransfer(lease: CameraTransferLease) = synchronized(lock) {
+        lease.released = true
+        // Keep the event barrier after cancellation/missing confirmation. It clears on a
+        // terminal event or a fresh TCP session, never by attributing an old event to a new file.
+        if (!lease.armed) lease.terminal.complete(null)
+    }
 
     fun connect(factory: SocketFactory = socketFactory) = synchronized(lock) {
         if (session != null) return@synchronized
@@ -67,15 +94,33 @@ class CameraClient(
     fun startRecording() = submit(listOf(CameraCommand.START_RECORDING), CameraAction.START_RECORDING)
     fun stopRecording() = submit(listOf(CameraCommand.STOP_RECORDING), CameraAction.STOP_RECORDING)
 
-    internal suspend fun requestMedia(operation: CameraMediaOperation): CameraMessage {
+    internal suspend fun requestMedia(
+        operation: CameraMediaOperation,
+        owner: CameraTransferLease? = null
+    ): CameraMessage {
         val deferred = CompletableDeferred<CameraMessage>()
         synchronized(lock) {
             val current = session ?: throw CameraMediaException(CameraMediaError.DISCONNECTED)
+            if (current.transfer?.released == false && current.transfer !== owner)
+                throw CameraMediaException(CameraMediaError.BUSY)
+            if (owner != null && (current.transfer !== owner || owner.released))
+                throw CameraMediaException(CameraMediaError.DISCONNECTED)
+            if (operation is CameraMediaOperation.GetFile) {
+                if (owner == null) throw CameraMediaException(CameraMediaError.BUSY)
+                val file = operation.request
+                if (file.offset < 0 || file.fetchSize < 0 || file.name.isBlank() ||
+                    file.name.contains('/') || file.name.contains('\\') || file.name.any { it.isISOControl() }
+                )
+                    throw CameraMediaException(CameraMediaError.INVALID_PATH)
+            }
             if (mutableState.value.connection != ConnectionStatus.CONNECTED)
                 throw CameraMediaException(CameraMediaError.DISCONNECTED)
             if (!mutableState.value.canSendCommand) throw CameraMediaException(CameraMediaError.BUSY)
             if (!current.commands.trySend(listOf(Outbound(operation.id, operation.arguments(), deferred))).isSuccess)
                 throw CameraMediaException(CameraMediaError.DISCONNECTED)
+            // The queued GET_FILE still owns its eventual terminal event if its caller
+            // cancels before the worker writes it. Do not clear that barrier early.
+            if (operation is CameraMediaOperation.GetFile) owner?.armed = true
             current.mediaResponse = deferred
             current.reservedCommands = setOf(operation.id)
             mutableState.value = mutableState.value.copy(pending = setOf(operation.id), error = null)
@@ -99,7 +144,7 @@ class CameraClient(
         val response: CompletableDeferred<CameraControlResult>
         synchronized(lock) {
             current = session ?: return CameraControlResult(false, "Cámara desconectada")
-            if (!mutableState.value.canSendCommand || mutableState.value.recording != RecordingState.IDLE)
+            if (current.transfer?.released == false || !mutableState.value.canSendCommand || mutableState.value.recording != RecordingState.IDLE)
                 return CameraControlResult(false, "Reinicio no permitido: cámara ocupada o grabación no inactiva")
             response = CompletableDeferred()
             current.previewResult = CameraCommand.STOP_PREVIEW to response
@@ -132,7 +177,7 @@ class CameraClient(
     private suspend fun previewCommand(id: Int): CameraControlResult {
         val result = synchronized(lock) {
             val current = session
-            if (current == null || !mutableState.value.canSendCommand) null else {
+            if (current == null || current.transfer?.released == false || !mutableState.value.canSendCommand) null else {
                 val deferred = CompletableDeferred<CameraControlResult>()
                 current.previewResult = id to deferred
                 submit(listOf(id))
@@ -146,6 +191,7 @@ class CameraClient(
 
     private fun submit(commands: List<Int>, action: CameraAction? = null) = synchronized(lock) {
         val current = session ?: return@synchronized
+        if (current.transfer?.released == false) return@synchronized
         val previous = mutableState.value
         val allowed = when (action) {
             CameraAction.TAKE_PHOTO -> previous.canTakePhoto
@@ -185,6 +231,7 @@ class CameraClient(
         mutableState.value = CameraState()
         previous?.mediaResponse?.completeExceptionally(CameraMediaException(CameraMediaError.DISCONNECTED))
         previous?.mediaResponse = null
+        previous?.transfer?.terminal?.complete(null)
     }
 
     override fun close() {
@@ -232,7 +279,13 @@ class CameraClient(
                 val request = buildJsonObject {
                     put("msg_id", id)
                     put("token", if (id == LOGIN) 0 else checkNotNull(token))
-                    command.extras.forEach { (key, value) -> put(key, value) }
+                    command.extras.forEach { (key, value) ->
+                        if (id == CameraCommand.GET_FILE && key in setOf("offset", "fetch_size")) put(
+                            key,
+                            value.toLong()
+                        )
+                        else put(key, value)
+                    }
                 }
                 val raw = request.toString()
                 update(current) {
@@ -248,6 +301,7 @@ class CameraClient(
                     }
                     it.copy(lastRequest = raw)
                 }
+                if (id == CameraCommand.GET_FILE) synchronized(lock) { current.transfer?.armed = true }
                 output.write(raw.toByteArray(Charsets.UTF_8))
                 output.flush()
                 update(current) { diagnostics.sent(id); it }
@@ -295,6 +349,14 @@ class CameraClient(
                         ByteBuffer.wrap(frame.toByteArray(Charsets.ISO_8859_1)),
                     ).toString()
                     val message = cameraJson.decodeFromString<CameraMessage>(raw)
+                    synchronized(lock) {
+                        if (session === current) {
+                            val transfer = current.transfer
+                            if (transfer?.armed == true) parseFileEvent(message)?.let { transfer.terminal.complete(it) }
+                            if (message.messageId == CameraCommand.GET_FILE && message.rval != null && message.rval != 0)
+                                transfer?.terminal?.complete(null)
+                        }
+                    }
                     update(current) { diagnostics.received(message); it }
                     synchronized(lock) {
                         if (session === current && current.stopConfirmationArmed && message.messageId == EVENT) {
@@ -399,6 +461,7 @@ class CameraClient(
                 }
                 current.mediaResponse?.completeExceptionally(CameraMediaException(mediaFailure))
                 current.mediaResponse = null
+                current.transfer?.terminal?.complete(null)
             }
         }
     }

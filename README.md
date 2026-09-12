@@ -842,3 +842,133 @@ Todas las comprobaciones anteriores fueron ejecutadas satisfactoriamente con
 la cámara real. No se borró ni descargó ningún archivo. La validación incluye
 la integración de la pantalla, la navegación segura, la rotación y la
 compatibilidad con preview, fotografía y grabación.
+
+## Hito 5B — descarga fiable de medios
+
+### Protocolo validado físicamente — experimento 5.1
+
+Pruebas comunicadas por el usuario con YDXJ01XY, hardware YDXJ_v23L,
+firmware YDXJv25L_1.5.12, Android 16 y targetSdk 36:
+
+- Control TCP 7878 y datos binarios TCP 8787.
+- msg_id=1285, token dinámico, param=filename, offset y fetch_size.
+- size representa el tamaño total; rem_size, los bytes de esta petición.
+- THM completo: 72582 bytes; JPEG Exif 640×360.
+- JPG completo: 3310683 bytes; JPEG Exif 4608×3456.
+- MP4 completo: 18178802 bytes; H.264 Main 1920×1080 59.94 fps, AAC LC
+  48 kHz estéreo, duración 6.49 s. La transferencia tardó aproximadamente 65 s.
+- get_file_complete observado; get_file_fail observado al cerrar el receptor
+  prematuramente.
+- Dos peticiones THM de 4096 bytes con offsets 0 y 4096 reconstruyeron los
+  primeros 8192 bytes del original: comparación cmp=0.
+- HTTP :80 devolvió Connection refused. **HTTP no se usa en esta cámara.**
+
+El md5sum del evento tiene semántica no confirmada: no coincidió con el MD5
+de los fragmentos aun cuando la reconstrucción fue correcta. No se usa para
+validación; el diagnóstico solo informa de su presencia.
+
+### Implementado — pendiente de prueba física A–H
+
+CameraConnectionService posee CameraMediaDownloader. La UI observa su estado;
+rotación, Home o abrir otra app no cancelan la transferencia. Se conserva el
+único CameraClient y la única sesión de control/token. El socket de datos
+se crea con el SocketFactory del mismo CameraNetworkBinding YI. No se modifica
+el routing global ni se pide Internet a la cámara.
+
+Antes de transferir se exige RecordingState.IDLE y se detiene el preview
+limpiamente desde su propietario UI. No se reinicia al terminar. Una reserva
+exclusiva impide que otras acciones cambien el working directory o interfieran
+con 1285. Foto, grabación, navegación, refresh y preview manual quedan bloqueados
+durante la transferencia: restricción conservadora pendiente de flexibilizar
+mediante pruebas físicas. Las acciones de limpieza siguen disponibles.
+
+Secuencia: confirmar CHANGE_DIRECTORY (parent), abrir 8787, enviar 1285 por
+7878, validar ACK y leer exactamente rem_size bytes. Se usa un buffer fijo de
+64 KiB y contadores Long; lecturas parciales son normales. Se cierra el socket
+al alcanzar el objetivo sin esperar EOF. Connect timeout: 5 s; inactividad
+de datos: 15 s. El timeout del ACK sigue siendo el de control; no hay un límite
+total de 5 s para el vídeo.
+
+Una descarga nueva pide offset=0 y fetch_size=tamaño. Reanudar toma la longitud
+del temporal y pide los bytes restantes; el ACK debe conservar el tamaño remoto
+esperado. Un rem_size menor produce un parcial pausado y permite otra reanudación
+manual, sin bucle automático de comandos. Un tamaño diferente impide append y
+requiere Descartar antes de iniciar otra descarga.
+
+Tras DATA_COMPLETE se esperan hasta 3 s de confirmación. Con todos los bytes
+del archivo y sin error se publica incluso si falta el evento, indicando
+«Descargado; confirmación de cámara ausente». Un get_file_fail produce error y
+conserva el parcial válido. Estos eventos no identifican el archivo: la reserva
+anterior conserva una barrera hasta recibir su evento terminal o renovar TCP.
+La siguiente transferencia espera hasta 5 s; si la barrera continúa, ofrece
+«Reiniciar sesión TCP». Esta acción explícita conserva Wi-Fi y el parcial,
+obtiene un token nuevo y permite Reanudar. No se atribuye un evento antiguo al
+archivo nuevo. Un get_file_fail tardío actualiza el resultado sin borrar
+automáticamente los bytes completos ya publicados.
+
+Cancelar cierra 8787, cancela la lectura y conserva los bytes escritos sin
+cerrar 7878/Wi-Fi/FGS. Un get_file_fail posterior pertenece a esa transferencia,
+no a un error global. BLOCKED pausa y conserva el parcial; UNBLOCKED no reinicia
+1285 automáticamente. Reanudar es manual. Descartar elimina únicamente el
+temporal privado. Desconectar explícitamente cancela, descarta el parcial y
+libera los recursos de conexión. LOST cancela; si el servicio se destruye se
+limpian sus temporales.
+
+Los parciales están en el directorio privado filesDir/yi-transfers. No se
+ofrece resume tras process death: no hay metadatos de reconstrucción, credenciales
+persistidas ni arranque automático de Wi-Fi. En el siguiente inicio del servicio
+se limpian exclusivamente sus temporales antiguos.
+
+Solo un JPG/MP4 completo se copia a MediaStore Images/Video, con nombre original
+y MIME image/jpeg o video/mp4. En API 29+ se usa IS_PENDING durante publicación
+y Pictures/YI Action Camera o Movies/YI Action Camera. La publicación local
+completa su commit; Cancelar se deshabilita en ese paso. Si falla, se elimina
+solo la URI recién creada y el temporal completo permite «Guardar de nuevo»
+sin otra descarga. Abrir usa ACTION_VIEW con permiso de lectura de la URI.
+API 26–28 solicita READ_EXTERNAL_STORAGE y WRITE_EXTERNAL_STORAGE, limitados a
+maxSdkVersion=28, al descargar para guardar y abrir el archivo; no solicita
+permisos legacy en Android moderno.
+Referencia: [almacenamiento compartido de Android](https://developer.android.com/training/data-storage/shared/media).
+
+Los THM se conservan exclusivamente en archivos privados, nunca en MediaStore.
+Se decodifican como JPEG con dimensiones y tamaño limitados; si falla se mantiene
+el icono genérico del vídeo. Caché por ruta remota+tamaño, máximo 32 entradas /
+16 MiB; se descartan THM mayores de 8 MiB. Solo se solicitan miniaturas de vídeos
+visibles en Medios y con preview detenido, una a la vez. No se solicitan en
+background. Una descarga explícita tiene prioridad y cancela la miniatura activa
+antes de comenzar. Los fallos de miniatura no marcan el vídeo como fallido.
+
+No se implementan borrado remoto, 1281, upload/1286, rename, move, formato,
+selección múltiple, sincronización, HTTP, DownloadManager, WorkManager,
+reproductor propio, Hito 5C ni Hito 6.
+
+### Pruebas automatizadas
+
+Validación de ACK con Long, campos ausentes y límites; eventos incompletos y
+MD5 no interpretado; lectura incremental de 3310683 bytes con buffer fijo,
+sin leer después del objetivo; EOF temprano, timeout y error de almacenamiento.
+Servidores locales de control/datos verifican orden de apertura, argumentos
+numéricos, token dinámico, una transferencia activa, cierre sin EOF del servidor,
+append/reanudación, cancelación, barrera de eventos, cambio de tamaño,
+BLOCKED, caché THM y publicación exclusivamente tras completar.
+MediaPublisher se sustituye en JVM para verificar fallos y reintento de
+publicación sin volver a abrir el socket. MediaStore real, notificación, visor
+externo y callbacks Android se comprueban físicamente.
+
+### Matriz física pendiente — Hito 5B
+
+| Prueba          | Pasos y resultado esperado                                                                                                                           |
+|-----------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| A — THM         | Abrir Medios/100MEDIA. Comprobar miniatura real del vídeo, fichero privado y ausencia de THM en la galería Android.                                  |
+| B — JPG         | Descargar YDXJ0257.jpg, observar progreso, abrir y comprobar resolución 4608×3456.                                                                   |
+| C — MP4         | Descargar YDXJ0251.mp4 hasta 100 %, abrir y comprobar audio/vídeo.                                                                                   |
+| D — Cancelación | Cancelar MP4 grande al 20–50 %. Comprobar parcial y continuidad de Wi-Fi/control TCP.                                                                |
+| E — Resume      | Reanudar; verificar offset > 0 en diagnóstico, tamaño final idéntico al remoto y reproducción correcta.                                              |
+| F — Background  | Durante descarga, Home/navegador con datos móviles. Comprobar Internet y progreso continuo o PAUSED si Android bloquea la red; reanudar manualmente. |
+| G — Rotación    | Rotar descargando. Progreso coherente, sin reinicio ni socket duplicado.                                                                             |
+| H — Desconectar | Pulsar Desconectar en notificación durante descarga. Comprobar cierre de datos/control, liberación Wi-Fi y servicio parado.                          |
+
+El Hito 5B solo se marcará físicamente validado tras superar A–H con la cámara.
+Verificación de entrega:
+
+    ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug

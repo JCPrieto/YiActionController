@@ -19,6 +19,7 @@ class CameraMediaRepositoryTest {
             operations += operation
             if (operation == gateOperation) gate.await()
             when (operation) {
+                is CameraMediaOperation.GetFile -> error("Downloader owns GET_FILE")
                 CameraMediaOperation.Total -> CameraMessage(messageId = 5, rval = 0, param = JsonPrimitive(31154688))
                 CameraMediaOperation.Free -> CameraMessage(messageId = 5, rval = 0, param = JsonPrimitive(29852096))
                 CameraMediaOperation.Pwd -> CameraMessage(messageId = 1283, rval = 0, pwd = JsonPrimitive(cwd))
