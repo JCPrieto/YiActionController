@@ -48,6 +48,7 @@ class CameraPreviewController(
     private val stopControl: suspend () -> CameraControlResult,
     private val canRestart: () -> Boolean = { false },
     private val stopAndConfirm: suspend () -> CameraControlResult = { CameraControlResult(false) },
+    private val stopForSettingsControl: suspend () -> CameraControlResult = stopAndConfirm,
 ) {
     private val mutableStatus = MutableStateFlow(PreviewStatus())
     val status = mutableStatus.asStateFlow()
@@ -56,6 +57,7 @@ class CameraPreviewController(
     private var cameraMayStream = false
     private var operation: Job? = null
     private var cleanup: Job? = null
+    private var lastStopConfirmed = false
     private var released = false
     private val observer = scope.launch {
         playback.status.collect { update ->
@@ -128,7 +130,7 @@ class CameraPreviewController(
         }
     }
 
-    fun stop(errorType: PreviewError? = null, error: String? = null) {
+    fun stop(errorType: PreviewError? = null, error: String? = null, awaitCameraStop: Boolean = false) {
         if (released) return
         val hadWork = wanted || engineActive || cameraMayStream || operation?.isActive == true
         wanted = false
@@ -144,7 +146,10 @@ class CameraPreviewController(
         cleanup = scope.launch {
             starting?.join()
             val sentStop = cameraMayStream && connected()
-            val result = if (sentStop) stopControl() else CameraControlResult(true)
+            val result = if (sentStop) {
+                if (awaitCameraStop) stopForSettingsControl() else stopControl()
+            } else CameraControlResult(true)
+            lastStopConfirmed = sentStop && awaitCameraStop && result.accepted
             cameraMayStream = !result.accepted
             val currentErrorType = mutableStatus.value.errorType
             val currentError = mutableStatus.value.error
@@ -169,6 +174,16 @@ class CameraPreviewController(
         stop()
         cleanup?.join()
         return !cameraMayStream && !engineActive && !wanted && !mutableStatus.value.controlPending
+    }
+
+    /** SET requires the physical vf_stop, not just acceptance of STOP_PREVIEW. */
+    suspend fun stopForSettings(): Boolean {
+        val needsConfirmation = wanted || engineActive || cameraMayStream ||
+                operation?.isActive == true || cleanup?.isActive == true
+        stop(awaitCameraStop = true)
+        cleanup?.join()
+        return !cameraMayStream && !engineActive && !wanted && !mutableStatus.value.controlPending &&
+                (!needsConfirmation || lastStopConfirmed)
     }
 
     fun networkLost() {

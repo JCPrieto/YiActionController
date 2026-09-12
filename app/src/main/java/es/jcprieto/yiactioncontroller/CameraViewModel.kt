@@ -68,6 +68,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         stopControl = { service.value?.stopPreview() ?: unavailable() },
         canRestart = { service.value?.canRestartPreview() == true },
         stopAndConfirm = { service.value?.stopPreviewAndAwaitVfStop() ?: unavailable() },
+        stopForSettingsControl = { service.value?.stopPreviewForSettings() ?: unavailable() },
     )
     val previewState = preview.status
     val player = playback.player
@@ -82,6 +83,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 if (lost) preview.networkLost() else preview.cameraDisconnected()
             }
             connected.attachDownloadPreparation(this@CameraViewModel) { preview.stopForDownload() }
+            connected.attachSettingsPreparation(this@CameraViewModel) { preview.stopForSettings() }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {

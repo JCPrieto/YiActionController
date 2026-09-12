@@ -34,6 +34,7 @@ class CameraConnectionService : Service() {
     private val notificationUpdates = CameraNotificationUpdates()
     private val previewClients = mutableMapOf<Any, (Boolean) -> Unit>()
     private val previewStoppers = mutableMapOf<Any, suspend () -> Boolean>()
+    private val settingsPreviewStoppers = mutableMapOf<Any, suspend () -> Boolean>()
     private var explicitDownloadPending = false
     private val attemptedThumbnails = mutableSetOf<String>()
     private val downloader: CameraMediaDownloader by lazy {
@@ -66,8 +67,9 @@ class CameraConnectionService : Service() {
         CameraSettingsRepository(
             scope, client::requestSettings, ::settingsAvailability, client::sessionIdentity,
             preparePreview = {
-                if (previewStoppers.isEmpty()) !cameraState.value.previewControlRequested
-                else previewStoppers.values.toList().all { it() }
+                diagnostics.append("SETTINGS", "Esperando parada confirmada de preview antes de SET")
+                if (settingsPreviewStoppers.isEmpty()) !cameraState.value.previewControlRequested
+                else settingsPreviewStoppers.values.toList().all { it() }
             },
             diagnostic = { diagnostics.append("SETTINGS", it) },
         )
@@ -269,10 +271,15 @@ class CameraConnectionService : Service() {
     internal fun detachPreview(owner: Any) {
         previewClients.remove(owner)
         previewStoppers.remove(owner)
+        settingsPreviewStoppers.remove(owner)
     }
 
     internal fun attachDownloadPreparation(owner: Any, stop: suspend () -> Boolean) {
         previewStoppers[owner] = stop
+    }
+
+    internal fun attachSettingsPreparation(owner: Any, stop: suspend () -> Boolean) {
+        settingsPreviewStoppers[owner] = stop
     }
 
     fun connect(ssid: String, password: String) {
@@ -360,6 +367,15 @@ class CameraConnectionService : Service() {
 
     suspend fun stopPreviewAndAwaitVfStop(): CameraControlResult =
         if (canControl()) client.stopPreviewAndAwaitVfStop() else unavailableControl()
+
+    /** Cleanup owned by the active settings mutation, which intentionally blocks normal controls. */
+    internal suspend fun stopPreviewForSettings(): CameraControlResult {
+        if (!active.value || wifiStatus.value.state != CameraWifiState.CONNECTED ||
+            settings.state.value.mutation !is CameraSettingsMutationState.Applying ||
+            downloader.busy || explicitDownloadPending || mediaState.value.loading
+        ) return unavailableControl()
+        return client.stopPreviewAndAwaitVfStop()
+    }
 
     private fun unavailableControl() = CameraControlResult(false, "Sesión de cámara no disponible o red bloqueada")
 
@@ -457,6 +473,7 @@ class CameraConnectionService : Service() {
         terminate(releaseWifi = true)
         previewClients.clear()
         previewStoppers.clear()
+        settingsPreviewStoppers.clear()
         client.close()
         scope.cancel()
         super.onDestroy()

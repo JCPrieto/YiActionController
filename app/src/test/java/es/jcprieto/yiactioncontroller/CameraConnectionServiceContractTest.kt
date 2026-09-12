@@ -43,6 +43,8 @@ class CameraConnectionServiceContractTest {
         assertTrue(service.contains("recovery.binding?.previewTransport"))
         assertTrue(viewModel.contains("currentPreviewTransport()"))
         assertTrue(viewModel.contains("canRestart = { service.value?.canRestartPreview() == true }"))
+        assertTrue(viewModel.contains("connected.attachSettingsPreparation(this@CameraViewModel) { preview.stopForSettings() }"))
+        assertTrue(viewModel.contains("stopForSettingsControl = { service.value?.stopPreviewForSettings() ?: unavailable() }"))
         assertTrue(service.contains("internal fun canRestartPreview(): Boolean = previewRecoveryAllowed("))
         val cleared = viewModel.substringAfter("override fun onCleared()")
         assertTrue(cleared.contains("unbind()"))

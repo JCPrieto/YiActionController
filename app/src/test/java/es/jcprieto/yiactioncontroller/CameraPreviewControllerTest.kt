@@ -5,11 +5,88 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.*
 import org.junit.Test
 import javax.net.SocketFactory
 
 class CameraPreviewControllerTest {
+    @Test
+    fun settingsNeverSendsSetAfterStopAckUntilVfStopAndDoesNotRestartPreview() = runBlocking {
+        for (confirmedSuccessfully in listOf(true, false)) {
+            val engine = FakePlayback()
+            val ack = CompletableDeferred<Unit>()
+            val vfStop = CompletableDeferred<Boolean>()
+            var confirmedStops = 0
+            var ordinaryStops = 0
+            val controller = CameraPreviewController(
+                this, engine, { true },
+                { CameraControlResult(true) },
+                { ordinaryStops++; CameraControlResult(true) },
+                stopForSettingsControl = {
+                    confirmedStops++
+                    ack.await()
+                    if (vfStop.await()) CameraControlResult(true) else CameraControlResult(false, "Timeout vf_stop")
+                })
+            var currentValue = "on"
+            val commands = mutableListOf<CameraSettingsOperation>()
+            val identity = Any()
+            val repository = CameraSettingsRepository(this, { op ->
+                commands += op
+                when (op) {
+                    CameraSettingsOperation.ReadAll -> CameraMessage(
+                        3, 0,
+                        param = JsonArray(listOf(buildJsonObject { put("auto_low_light", currentValue) }))
+                    )
+
+                    is CameraSettingsOperation.ReadAllowed -> cameraJson.decodeFromString<CameraMessage>(
+                        """{"msg_id":3,"rval":0,"param":[{"auto_low_light":"settable:on#off"}]}"""
+                    )
+
+                    is CameraSettingsOperation.SetValue -> {
+                        currentValue = op.value
+                        CameraMessage(2, 0)
+                    }
+                }
+            }, { null }, { identity }, controller::stopForSettings, {})
+            try {
+                controller.start(transport); yield()
+                repository.setForeground(true); repository.open()
+                withTimeout(1000) { repository.state.first { it.discovered } }
+                commands.clear()
+                repository.apply("auto_low_light", "off"); yield(); yield()
+                ack.complete(Unit); yield()
+                assertEquals(1, confirmedStops)
+                assertEquals(0, ordinaryStops)
+                assertEquals(PreviewState.STOPPING, controller.status.value.state)
+                assertTrue(controller.status.value.controlPending)
+                assertTrue(commands.isEmpty()) // Exact regression: ACK alone cannot send msg_id=2.
+                vfStop.complete(confirmedSuccessfully)
+                withTimeout(1000) { repository.state.first { !it.busy } }
+                if (confirmedSuccessfully) {
+                    assertEquals(1, commands.count { it is CameraSettingsOperation.SetValue })
+                    assertEquals(
+                        CameraSettingsMutationState.Verified("auto_low_light", "off"),
+                        repository.state.value.mutation
+                    )
+                    assertEquals(PreviewState.IDLE, controller.status.value.state)
+                } else {
+                    assertTrue(commands.isEmpty())
+                    assertEquals(
+                        CameraSettingsMutationState.Failed("auto_low_light", CameraSettingsError.PREVIEW_STOP_FAILED),
+                        repository.state.value.mutation
+                    )
+                }
+                assertEquals(1, engine.starts)
+                assertFalse(engine.allocated)
+            } finally {
+                repository.reset(); controller.release()
+            }
+        }
+    }
+
     @Test
     fun recoveryUsesLiveOwnerStateWhenUiStillShowsAwaitingStop() = runBlocking {
         val live = kotlinx.coroutines.flow.MutableStateFlow(

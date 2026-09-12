@@ -1110,6 +1110,14 @@ una copia todavía marcada awaitingPreviewStop bloquee la continuación.
 Una prueba JVM reproduce ese desfase. Pendiente repetir la recuperación hasta
 PLAYING y después la prueba E completa con un SET desde Ajustes.
 
+En la siguiente prueba E, el SET auto_low_light se envió después del ACK de 260,
+pero antes del evento vf_stop, y la cámara respondió -21. Ajustes ahora espera
+ambas confirmaciones de parada antes del SET, reutilizando la espera acotada del
+cliente (también admite vf_stop anterior al ACK). Si no se confirma la parada,
+PREVIEW_STOP_FAILED impide enviar SET. Una prueba integrada de repository y
+preview reproduce ACK adelantado, vf_stop retrasado y fallo de confirmación.
+Pendiente repetir E con esta corrección; no se asigna significado universal a -21.
+
 - [x] A — Conectar, abrir Ajustes y comprobar valores de vídeo (resolución/calidad/marca),
   foto, buzzer y LED. No aparece contraseña Wi-Fi.
 - [x] B — Cambiar manualmente video_stamp off → date; verificar UI y GET real.
