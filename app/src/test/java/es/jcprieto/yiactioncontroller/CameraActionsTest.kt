@@ -306,7 +306,7 @@ class CameraActionsTest {
                         val state = client.awaitState { it.canSendCommand }
                         assertNull(state.pendingAction)
                         assertEquals(ConnectionStatus.CONNECTED, state.connection)
-                        assertEquals(12, state.token)
+                        assertTrue(state.authenticated)
                         assertTrue(state.error!!.contains("rval=-42"))
                     }
                 }
@@ -330,7 +330,7 @@ class CameraActionsTest {
                         assertEquals(action.commandId, peer.request().messageId)
                         val state = client.awaitState { it.connection == ConnectionStatus.DISCONNECTED }
                         assertEquals("Sin respuesta al comando ${action.commandId}", state.error)
-                        assertNull(state.token)
+                        assertFalse(state.authenticated)
                         assertNull(state.pendingAction)
                         assertEquals(RecordingState.UNKNOWN, state.recording)
                         assertTrue(state.pending.isEmpty())

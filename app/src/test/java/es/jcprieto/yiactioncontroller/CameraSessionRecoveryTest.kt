@@ -57,7 +57,7 @@ class CameraSessionRecoveryTest {
             assertSame(binding, f.recovery.binding)
             assertEquals(0, f.closed)
             assertEquals(1, f.attempts.size)
-            assertNull(f.state.token)
+            assertFalse(f.state.authenticated)
             if (blocked) assertTrue(f.messages.any { it.contains("Suspendido") })
         }
     }
@@ -80,13 +80,13 @@ class CameraSessionRecoveryTest {
     @Test
     fun liveTcpDoesNotReconnectAndEachNewBlockedTransitionHasOneBudget() {
         val f = Fixture()
-        f.state = CameraState(connection = ConnectionStatus.CONNECTED, token = 8)
+        f.state = CameraState(connection = ConnectionStatus.CONNECTED, authenticated = true)
         f.network(CameraWifiState.BLOCKED); f.network(CameraWifiState.CONNECTED)
         assertEquals(1, f.attempts.size)
         repeat(2) {
             f.network(CameraWifiState.BLOCKED); f.fail()
             f.network(CameraWifiState.CONNECTED)
-            f.state = CameraState(connection = ConnectionStatus.CONNECTED, token = 9 + it)
+            f.state = CameraState(connection = ConnectionStatus.CONNECTED, authenticated = true)
             f.recovery.tcp(f.state)
         }
         assertEquals(3, f.attempts.size)
@@ -155,13 +155,13 @@ class CameraSessionRecoveryTest {
                         assertEquals(CameraRequest(3, token), peer.request())
                         peer.send("""{"msg_id":3,"rval":0,"param":[{"app_status":"idle"}]}""")
                         val state = withTimeout(4_000) { client.state.first { it.canSendCommand } }
-                        assertEquals(token, state.token)
+                        assertTrue(state.authenticated)
                         coordinator.tcp(state)
                         coordinator.network(CameraWifiStatus(CameraWifiState.BLOCKED, "wifi"))
                     }
                     val failed =
                         withTimeout(4_000) { client.state.first { it.connection == ConnectionStatus.DISCONNECTED } }
-                    assertNull(failed.token)
+                    assertFalse(failed.authenticated)
                     coordinator.tcp(failed)
                     assertNotNull(coordinator.binding)
                     if (token == 8) coordinator.network(CameraWifiStatus(CameraWifiState.CONNECTED, "wifi"))

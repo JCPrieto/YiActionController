@@ -62,9 +62,35 @@ class CameraConnectionService : Service() {
         diagnostic = { diagnostics.append("MEDIA", it) },
     )
     val mediaState = media.state
+    private val settings: CameraSettingsRepository by lazy {
+        CameraSettingsRepository(
+            scope, client::requestSettings, ::settingsAvailability, client::sessionIdentity,
+            preparePreview = {
+                if (previewStoppers.isEmpty()) !cameraState.value.previewControlRequested
+                else previewStoppers.values.toList().all { it() }
+            },
+            diagnostic = { diagnostics.append("SETTINGS", it) },
+        )
+    }
+    val settingsState get() = settings.state
+    fun setSettingsForeground(value: Boolean) = settings.setForeground(value)
+    fun openSettings() = settings.open()
+    fun refreshSettings() = settings.refresh()
+    fun applySetting(key: String, value: String) = settings.apply(key, value)
+
+    private fun settingsAvailability(write: Boolean): CameraSettingsError? = when {
+        wifiStatus.value.state == CameraWifiState.BLOCKED -> CameraSettingsError.BLOCKED
+        !active.value || cameraState.value.connection != ConnectionStatus.CONNECTED || client.sessionIdentity() == null ->
+            CameraSettingsError.DISCONNECTED
+
+        downloader.busy || explicitDownloadPending -> CameraSettingsError.DOWNLOAD_ACTIVE
+        media.state.value.loading || !cameraState.value.canSendCommand -> CameraSettingsError.BUSY
+        write && cameraState.value.recording != RecordingState.IDLE -> CameraSettingsError.NOT_IDLE
+        else -> null
+    }
 
     private fun mediaAvailability(): CameraMediaError? =
-        if (downloader.busy || explicitDownloadPending) CameraMediaError.BUSY else mediaAvailability(
+        if (downloader.busy || explicitDownloadPending || settings.state.value.busy) CameraMediaError.BUSY else mediaAvailability(
             active.value, wifiStatus.value.state == CameraWifiState.BLOCKED, cameraState.value,
         )
 
@@ -73,12 +99,13 @@ class CameraConnectionService : Service() {
         !active.value || recovery.binding == null || cameraState.value.connection != ConnectionStatus.CONNECTED ->
             CameraDownloadError.NETWORK_LOST
 
-        media.state.value.loading || !cameraState.value.canSendCommand -> CameraDownloadError.BUSY
+        settings.state.value.busy || media.state.value.loading || !cameraState.value.canSendCommand -> CameraDownloadError.BUSY
         cameraState.value.recording != RecordingState.IDLE -> CameraDownloadError.NOT_IDLE
         else -> null
     }
 
     fun download(entry: CameraMediaEntry) {
+        if (settings.state.value.busy) return
         if (explicitDownloadPending || downloader.busy && !downloader.status.value.thumbnail) return
         explicitDownloadPending = true
         scope.launch {
@@ -165,6 +192,7 @@ class CameraConnectionService : Service() {
         }
         scope.launch {
             cameraState.collect {
+                settings.sessionChanged()
                 if (it.connection == ConnectionStatus.DISCONNECTED) {
                     media.onDisconnected()
                     downloader.cancel(
@@ -279,7 +307,8 @@ class CameraConnectionService : Service() {
         if (active.value && wifiStatus.value.state == CameraWifiState.CONNECTED) recovery.binding?.previewTransport else null
 
     private fun canControl() =
-        active.value && wifiStatus.value.state != CameraWifiState.BLOCKED && !downloader.busy && !explicitDownloadPending
+        active.value && wifiStatus.value.state != CameraWifiState.BLOCKED && !downloader.busy && !explicitDownloadPending &&
+                !settings.state.value.busy
     fun retryTcp() {
         if (!canControl()) return
         if (client.hasTransferBarrier()) {
@@ -338,6 +367,7 @@ class CameraConnectionService : Service() {
             if (networkLost) downloader.cancel(CameraDownloadError.NETWORK_LOST) else downloader.shutdown()
             attemptedThumbnails.clear()
             media.reset()
+            settings.reset()
             previewClients.values.toList().forEach { it(networkLost) }
             recovery.clear()
             if (releaseWifi) {

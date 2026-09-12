@@ -8,11 +8,15 @@ class CameraMediaTest {
     @Test
     fun servicePreconditionsAllowRecordingButNotBlockedMissingSdOrBusy() {
         val camera =
-            CameraState(connection = ConnectionStatus.CONNECTED, token = 19, recording = RecordingState.RECORDING)
+            CameraState(
+                connection = ConnectionStatus.CONNECTED,
+                authenticated = true,
+                recording = RecordingState.RECORDING
+            )
         assertNull(mediaAvailability(true, false, camera))
         assertEquals(CameraMediaError.BLOCKED, mediaAvailability(true, true, camera))
         assertEquals(CameraMediaError.DISCONNECTED, mediaAvailability(false, false, camera))
-        assertEquals(CameraMediaError.DISCONNECTED, mediaAvailability(true, false, camera.copy(token = null)))
+        assertEquals(CameraMediaError.DISCONNECTED, mediaAvailability(true, false, camera.copy(authenticated = false)))
         assertEquals(
             CameraMediaError.SD_MISSING, mediaAvailability(
                 true, false,

@@ -3,6 +3,7 @@ package es.jcprieto.yiactioncontroller
 object CameraCommand {
     const val LOGIN = 257
     const val GET_CONFIG = 3
+    const val SET_CONFIG = 2
     const val GET_BATTERY = 13
     const val TAKE_PHOTO = 769
     const val START_RECORDING = 513

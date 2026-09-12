@@ -29,6 +29,7 @@ class CameraClient(
         val id: Int,
         val extras: Map<String, String> = emptyMap(),
         val response: CompletableDeferred<CameraMessage>? = null,
+        val settings: CameraSettingsOperation? = null,
     )
     private class Session(val factory: SocketFactory) {
         var socket: Socket? = null
@@ -40,6 +41,7 @@ class CameraClient(
         // Covers queued, in-flight and abandoned awaits until reply/terminal cleanup.
         var mediaResponse: CompletableDeferred<CameraMessage>? = null
         var transfer: CameraTransferLease? = null
+        val settingsAllowed = mutableMapOf<String, List<String>>()
 
         // Guarded by lock; reserve immediately so rapid taps cannot queue multiple actions.
         var reservedCommands: Set<Int> = emptySet()
@@ -93,6 +95,55 @@ class CameraClient(
     fun takePhoto() = submit(listOf(CameraCommand.TAKE_PHOTO), CameraAction.TAKE_PHOTO)
     fun startRecording() = submit(listOf(CameraCommand.START_RECORDING), CameraAction.START_RECORDING)
     fun stopRecording() = submit(listOf(CameraCommand.STOP_RECORDING), CameraAction.STOP_RECORDING)
+
+    /** Uses the very same worker, pending slot and timeout as media/control. */
+    internal suspend fun requestSettings(operation: CameraSettingsOperation): CameraMessage {
+        val deferred = CompletableDeferred<CameraMessage>()
+        synchronized(lock) {
+            val current = session ?: throw CameraSettingsException(CameraSettingsError.DISCONNECTED)
+            val key = when (operation) {
+                is CameraSettingsOperation.ReadAllowed -> operation.key
+                is CameraSettingsOperation.SetValue -> operation.key
+                CameraSettingsOperation.ReadAll -> null
+            }
+            if (key != null && key !in EDITABLE_SETTING_KEYS)
+                throw CameraSettingsException(CameraSettingsError.UNSUPPORTED_SETTING)
+            if (current.transfer?.released == false) throw CameraSettingsException(CameraSettingsError.DOWNLOAD_ACTIVE)
+            if (mutableState.value.connection != ConnectionStatus.CONNECTED)
+                throw CameraSettingsException(CameraSettingsError.DISCONNECTED)
+            if (!mutableState.value.canSendCommand) throw CameraSettingsException(CameraSettingsError.BUSY)
+            if (operation is CameraSettingsOperation.SetValue) {
+                if (mutableState.value.recording != RecordingState.IDLE)
+                    throw CameraSettingsException(CameraSettingsError.NOT_IDLE)
+                if (operation.value !in current.settingsAllowed[operation.key].orEmpty())
+                    throw CameraSettingsException(CameraSettingsError.UNSUPPORTED_VALUE)
+                current.settingsAllowed.clear()
+            }
+            if (!current.commands.trySend(
+                    listOf(
+                        Outbound(
+                            operation.id,
+                            operation.arguments(),
+                            deferred,
+                            operation
+                        )
+                    )
+                ).isSuccess
+            )
+                throw CameraSettingsException(CameraSettingsError.DISCONNECTED)
+            current.mediaResponse = deferred
+            current.reservedCommands = setOf(operation.id)
+            mutableState.value = mutableState.value.copy(pending = setOf(operation.id), error = null)
+        }
+        return try {
+            deferred.await()
+        } catch (e: CameraMediaException) {
+            throw CameraSettingsException(
+                if (e.kind == CameraMediaError.TIMEOUT) CameraSettingsError.TIMEOUT
+                else if (e.kind == CameraMediaError.PROTOCOL) CameraSettingsError.INVALID_RESPONSE else CameraSettingsError.DISCONNECTED
+            )
+        }
+    }
 
     internal suspend fun requestMedia(
         operation: CameraMediaOperation,
@@ -299,7 +350,10 @@ class CameraClient(
                         configRecordingRevision = actionConfigRevision ?: it.recordingRevision
                         actionConfigRevision = null
                     }
-                    it.copy(lastRequest = raw)
+                    // Keep the diagnostic request shape, never the live authentication token.
+                    it.copy(lastRequest = buildJsonObject {
+                        request.forEach { (key, value) -> if (key == "token") put(key, 0) else put(key, value) }
+                    }.toString())
                 }
                 if (id == CameraCommand.GET_FILE) synchronized(lock) { current.transfer?.armed = true }
                 output.write(raw.toByteArray(Charsets.UTF_8))
@@ -373,14 +427,15 @@ class CameraClient(
                             ?: error("Token de sesión no válido")
                         pending.remove(LOGIN)
                         update(current) {
-                            it.copy(connection = ConnectionStatus.CONNECTED, token = token)
+                            it.copy(connection = ConnectionStatus.CONNECTED, authenticated = true)
                         }
                         enqueueQueries()
                     } else if (completesRequest) {
                         pending.remove(message.messageId)
                     }
                     update(current) {
-                        var next = it.applyMessage(message, raw)
+                        val detail = pendingCommand?.settings is CameraSettingsOperation.ReadAllowed
+                        var next = it.applyMessage(message, raw, fullConfiguration = !detail)
                         if (completesRequest && current.previewResult?.first == message.messageId) {
                             if (message.messageId == CameraCommand.STOP_PREVIEW && message.rval == 0 ||
                                 message.messageId == CameraCommand.START_PREVIEW && message.rval != 0
@@ -419,6 +474,12 @@ class CameraClient(
                     if (completesRequest) synchronized(lock) {
                         val response = pendingCommand?.response
                         if (response != null) {
+                            val detail = pendingCommand.settings as? CameraSettingsOperation.ReadAllowed
+                            if (detail != null && session === current) {
+                                current.settingsAllowed[detail.key] = if (message.rval == 0)
+                                    parseSettable(parseCameraConfiguration(message.param)?.values?.get(detail.key))
+                                else emptyList()
+                            }
                             if (current.mediaResponse === response) current.mediaResponse = null
                             // State must be idle before a resumed caller submits total/free or CD/LIST.
                             if (session === current) response.complete(message)

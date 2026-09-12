@@ -51,7 +51,7 @@ class CameraClientTest {
                         assertEquals(CameraRequest(3, token), peer.request())
                         peer.send("""{"rval":0,"msg_id":3,"param":[{"sw_version":"test"}]}""")
                         val state = client.awaitState { it.battery == 92 && it.pending.isEmpty() }
-                        assertEquals(token, state.token)
+                        assertTrue(state.authenticated)
                         assertEquals("test", state.firmware)
                         assertEquals(ConnectionStatus.CONNECTED, state.connection)
                         client.refresh()
@@ -102,7 +102,7 @@ class CameraClientTest {
                     peer.request()
                 }
                 val state = client.awaitState { it.error != null }
-                assertNull(state.token)
+                assertFalse(state.authenticated)
                 assertEquals(ConnectionStatus.DISCONNECTED, state.connection)
                 assertTrue(client.diagnostics.entries.value.any { it.contains("tipo=EOF") })
             }
@@ -125,7 +125,7 @@ class CameraClientTest {
                         peer.request()
                         peer.send(reply)
                         val state = client.awaitState { it.error != null }
-                        assertNull(state.token)
+                        assertFalse(state.authenticated)
                         assertEquals(ConnectionStatus.DISCONNECTED, state.connection)
                     }
                 }
@@ -163,7 +163,7 @@ class CameraClientTest {
                     val expired = client.awaitState { it.error != null }
                     assertTrue(expired.error!!.contains("comando 13"))
                     assertEquals(
-                        CameraRequest(13, 4),
+                        CameraRequest(13, 0), // Diagnostic snapshot redacts the live token.
                         cameraJson.decodeFromString<CameraRequest>(expired.lastRequest!!)
                     )
                     assertEquals("""{"msg_id":7,"type":"battery","param":"92"}""", expired.lastMessage)

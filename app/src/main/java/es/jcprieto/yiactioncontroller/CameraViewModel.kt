@@ -17,7 +17,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-enum class CameraScreen { CONTROL, MEDIA }
+enum class CameraScreen { CONTROL, MEDIA, SETTINGS }
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @UnstableApi
@@ -49,6 +49,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val mediaState = service.flatMapLatest { it?.mediaState ?: flowOf(CameraMediaBrowserState()) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, CameraMediaBrowserState())
+    val settingsState = service.flatMapLatest { it?.settingsState ?: flowOf(CameraSettingsState()) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, CameraSettingsState())
     val downloadStatus = service.flatMapLatest { it?.userDownload ?: flowOf(CameraDownloadStatus()) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, CameraDownloadStatus())
     val transferBusy = service.flatMapLatest { it?.downloadStatus?.map { status -> status.busy } ?: flowOf(false) }
@@ -78,6 +80,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             val connected = (binder as CameraConnectionService.LocalBinder).service
             service.value = connected
             connected.setMediaForeground(foreground)
+            connected.setSettingsForeground(foreground && screen.value == CameraScreen.SETTINGS)
             connected.attachPreview(this@CameraViewModel) { lost ->
                 if (lost) preview.networkLost() else preview.cameraDisconnected()
             }
@@ -129,6 +132,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun unbind() {
         service.value?.setMediaForeground(false)
+        service.value?.setSettingsForeground(false)
         service.value?.detachPreview(this)
         if (bound) {
             bound = false; app.unbindService(connection)
@@ -212,28 +216,30 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startPreview() {
-        if (transferBusy.value) return
+        if (transferBusy.value || settingsState.value.busy) return
         log("UI", "Iniciar vista previa"); preview.start(service.value?.currentPreviewTransport())
     }
 
     fun stopPreview() {
-        if (transferBusy.value) return
+        if (transferBusy.value || settingsState.value.busy) return
         log("UI", "Detener vista previa"); preview.stop()
     }
     fun restartPreview() {
-        if (transferBusy.value) return
+        if (transferBusy.value || settingsState.value.busy) return
         log("UI", "Reiniciar vista previa: un intento 260 + vf_stop + 259")
         preview.restart(service.value?.currentPreviewTransport())
     }
 
     fun onBackground() {
         foreground = false
+        service.value?.setSettingsForeground(false)
         service.value?.setMediaForeground(false)
         log("APP", "Segundo plano: detener preview"); preview.stop()
     }
 
     fun onForeground() {
         foreground = true
+        service.value?.setSettingsForeground(screen.value == CameraScreen.SETTINGS)
         service.value?.setMediaForeground(true)
         log("APP", "Primer plano: Wi-Fi=${wifiStatus.value.state} TCP=${state.value.connection}")
     }
@@ -243,12 +249,28 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun showControl() {
+        service.value?.setSettingsForeground(false)
         mutableScreen.value = CameraScreen.CONTROL
     }
 
     fun showMedia() {
+        service.value?.setSettingsForeground(false)
         mutableScreen.value = CameraScreen.MEDIA
         service.value?.openMedia()
+    }
+
+    fun showSettings() {
+        mutableScreen.value = CameraScreen.SETTINGS
+        service.value?.setSettingsForeground(foreground)
+        service.value?.openSettings()
+    }
+
+    fun refreshSettings() {
+        service.value?.refreshSettings()
+    }
+
+    fun applySetting(key: String, value: String) {
+        service.value?.applySetting(key, value)
     }
 
     fun refreshMedia() {

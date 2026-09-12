@@ -125,10 +125,11 @@ class MainActivity : ComponentActivity() {
                 val connectionError by model.connectionError.collectAsStateWithLifecycle()
                 val screen by model.screen.collectAsStateWithLifecycle()
                 val media by model.mediaState.collectAsStateWithLifecycle()
+                val settings by model.settingsState.collectAsStateWithLifecycle()
                 val download by model.downloadStatus.collectAsStateWithLifecycle()
                 val transferBusy by model.transferBusy.collectAsStateWithLifecycle()
                 val thumbnails by model.thumbnails.collectAsStateWithLifecycle()
-                BackHandler(screen == CameraScreen.MEDIA) { model.showControl() }
+                BackHandler(screen != CameraScreen.CONTROL) { model.showControl() }
                 Column(Modifier.fillMaxSize().statusBarsPadding()) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 20.dp),
@@ -142,19 +143,28 @@ class MainActivity : ComponentActivity() {
                             selected = screen == CameraScreen.MEDIA,
                             onClick = model::showMedia,
                             label = { Text("Medios") })
+                        FilterChip(
+                            selected = screen == CameraScreen.SETTINGS,
+                            onClick = model::showSettings, label = { Text("Ajustes") })
                     }
                     Box(Modifier.weight(1f)) {
-                        if (screen == CameraScreen.MEDIA) CameraMediaScreen(
+                        if (screen == CameraScreen.SETTINGS) CameraSettingsScreen(
+                            settings, state, wifi.state == CameraWifiState.BLOCKED, transferBusy, media.loading,
+                            model::refreshSettings, model::applySetting,
+                        ) else if (screen == CameraScreen.MEDIA) CameraMediaScreen(
                             media, state, serviceActive, wifi.state == CameraWifiState.BLOCKED,
                             model::refreshMedia, model::openMediaDirectory, model::mediaParent, model::mediaRoot,
-                            download, transferBusy, thumbnails, ::download, model::resumeDownload,
+                            download, transferBusy || settings.busy, thumbnails, ::download, model::resumeDownload,
                             model::cancelDownload, model::discardDownload, model::loadThumbnail, model::retryTcp,
                         ) else Diagnostics(
                             state, ::connectCamera, model::disconnect, model::refresh,
                             model::takePhoto, model::startRecording, model::stopRecording,
                             preview, player, network != null, model::startPreview, model::stopPreview,
                             history, model::clearDiagnosticHistory, model::restartPreview, wifi, permissionPending,
-                            serviceActive, connectionError, model::retryTcp, media.loading || transferBusy,
+                            serviceActive,
+                            connectionError,
+                            model::retryTcp,
+                            media.loading || transferBusy || settings.busy,
                         )
                     }
                 }
@@ -203,7 +213,7 @@ private fun Diagnostics(
         ) {
             Text("Cámara YI", style = MaterialTheme.typography.headlineMedium)
             Text("Servicio de conexión: " + if (serviceActive) "Activo" else "Inactivo")
-            if (mediaBusy) Text("Consulta de medios en curso…")
+            if (mediaBusy) Text("Operación de cámara en curso…")
             connectionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (wifi.state == CameraWifiState.BLOCKED) Text("Android ha bloqueado temporalmente el acceso a la red de la cámara.")
             if (automaticWifi) {
@@ -339,7 +349,7 @@ private fun Diagnostics(
                     DiagnosticField("Última foto", state.lastPhotoPath)
                     DiagnosticField("Último evento de foto", state.lastPhotoEvent?.name)
                     DiagnosticField("Último evento de grabación", state.lastRecordingEvent)
-                    DiagnosticField("Token", state.token?.toString())
+                    DiagnosticField("Sesión autenticada", if (state.authenticated) "Sí" else "No")
                     DiagnosticField("Batería", state.battery?.let { "$it %" })
                     DiagnosticField("Firmware", state.firmware)
                     DiagnosticField("Hardware", state.hardware)

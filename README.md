@@ -986,8 +986,143 @@ externo y callbacks Android se comprueban físicamente.
 | H — Desconectar | Pulsar Desconectar en notificación durante descarga. Comprobar cierre de datos/control, liberación Wi-Fi y servicio parado.                          |
 
 Las pruebas A–H están físicamente validadas según el resultado comunicado por el
-usuario. La corrección preventiva de Cancelar desde la notificación requiere
-una prueba adicional; no se da por resuelta por los tests JVM.
+usuario. Cancelar desde la notificación también quedó confirmado físicamente
+en la prueba adicional posterior.
+Verificación de entrega:
+
+    ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
+
+## Hito 6 — configuración dinámica y segura
+
+### VALIDADO FÍSICAMENTE — experimento 6.0
+
+Protocolo observado en YDXJ01XY / YDXJ_v23L, firmware
+YDXJv25L_1.5.12_build-20170809023225_git-b74efd19_r20:
+
+- GET completo: msg_id=3 con el token dinámico.
+- GET de opciones: msg_id=3 con param igual a la clave.
+- Dominio declarado: prefijo exacto settable: y valores separados por #.
+- Escritura: msg_id=2, type igual a la clave y param igual al valor de protocolo.
+- video_stamp: off → date, GET confirma date; date → off, GET confirma off.
+- rval=-13 observado al enviar video_stamp=on, valor no admitido en esa prueba.
+- rval=-25 observado al consultar una opción inexistente.
+
+Estos códigos describen observaciones del experimento; no se les asigna un
+significado universal para todos los comandos o firmwares.
+
+Valores observados (son evidencia del firmware probado; los allowedValues de
+runtime se descubren en la cámara y no se obtienen de esta tabla):
+
+| Ajuste                    | Valores observados                                                                                                                                                                                                  |
+|---------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| video_stamp / photo_stamp | off, date, time, date/time                                                                                                                                                                                          |
+| buzzer_volume             | high, low, mute                                                                                                                                                                                                     |
+| led_mode                  | all enable, all disable, status enable                                                                                                                                                                              |
+| video_quality             | S.Fine, Fine, Normal                                                                                                                                                                                                |
+| auto_low_light            | on, off                                                                                                                                                                                                             |
+| video_rotate              | off, on                                                                                                                                                                                                             |
+| loop_record               | on, off                                                                                                                                                                                                             |
+| photo_size                | 16M (4608x3456 4:3), 13M (4128x3096 4:3), 8M (3264x2448 4:3), 5M (2560x1920 4:3), 12M (4608x2592 16:9)                                                                                                              |
+| video_resolution          | 1920x1080 60P 16:9, 1920x1080 30P 16:9, 1920x1080 48P 16:9, 1920x1080 24P 16:9, 2304x1296 30P 16:9, 1280x960 60P 4:3, 1280x960 48P 4:3, 1280x720 60P 16:9, 1280x720 48P 16:9, 1280x720 120P 16:9, 848x480 240P 16:9 |
+
+### IMPLEMENTADO — pantalla pendiente de pruebas A–J
+
+CameraConnectionService posee CameraSettingsRepository. Se reutilizan CameraClient,
+su único socket 7878, el token dinámico y la única petición pendiente. Las respuestas
+de detalle se correlacionan con la operación que está en vuelo: un GET de settable
+no reemplaza la configuración actual ni el estado de grabación. Los eventos msg_id=7
+siguen su ruta independiente y no completan solicitudes GET/SET.
+
+Abrir Ajustes solo lee: primero GET completo, después consultas secuenciales de
+las claves editables presentes. Actualizar repite el descubrimiento, sin polling.
+Las capacidades permanecen en RAM durante la sesión; una nueva sesión las invalida.
+La rotación conserva el repository y no duplica una carga ya completada o activa.
+
+Whitelist editable: video_resolution, video_quality, video_stamp, photo_size,
+photo_quality, photo_stamp, buzzer_volume, led_mode, meter_mode, auto_low_light,
+video_rotate y loop_record. Una clave solo se presenta editable si además devuelve
+un dominio settable no vacío. Las claves ausentes no son errores globales; los
+detalles rechazados, incluido el -25 observado, dejan la propiedad solo lectura.
+No se inventan valores para photo_quality o meter_mode si el firmware no los ofrece.
+auto_power_off, video_standard y camera_clock permanecen solo lectura.
+Las claves desconocidas se conservan como información en el modelo y no se ofrecen
+en la pantalla genérica. Solo se muestran etiquetas conocidas.
+
+El parser admite valores String desconocidos y contabiliza entradas malformadas.
+Un duplicado válido sustituye el valor previo y suma una incidencia. Un param que
+no sea array es respuesta inválida. La ruta histórica de CameraState conserva
+compatibilidad con sus formatos anteriores, con la misma sanitización.
+El parser settable conserva espacios, mayúsculas y valores de protocolo; omite
+segmentos vacíos y duplicados. Los textos traducidos se usan solo al presentar.
+Solo dominios exactamente on/off se ofrecen mediante Switch; video_stamp usa selector.
+
+La escritura valida whitelist y allowedValues, exige RecordingState.IDLE y detiene
+limpiamente el preview mediante su propietario UI. Si la parada falla no envía SET.
+Tras SET espera ACK y relee toda la configuración: solo la igualdad exacta confirma
+el cambio. Un desacuerdo muestra VERIFY_FAILED y conserva el valor real leído;
+no hay actualización optimista definitiva, rollback ni reintento automático.
+Después se invalidan los dominios y se redescubren secuencialmente. Si se rechaza
+un SET se conserva el valor actual y se puede Actualizar para redescubrir.
+
+Las descargas y consultas de medios bloquean Ajustes. Mientras Ajustes está ocupado,
+las acciones incompatibles del servicio quedan bloqueadas. No se detienen descargas
+ni grabaciones para cambiar un ajuste. Los GET pueden convivir con preview; un SET
+lo deja detenido y nunca lo reinicia automáticamente.
+
+Salir de Ajustes detiene la secuencia de descubrimiento después de la petición actual.
+Si el SET ya empezó, el servicio termina SET + VERIFY aunque la app pase a background.
+No se inicia una secuencia al volver a foreground; el usuario puede Actualizar si
+quedaron capacidades por descubrir. Desconectar invalida la secuencia y su caché.
+
+SENSITIVE_SETTING_KEYS centraliza wifi_password, wifi_ssid, serial_number y
+dev_functions, además de la detección histórica de claves de credenciales.
+Se excluyen sus valores antes de poblar CameraState.configuration y SettingsState.
+El JSON diagnóstico se sanitiza y el historial solo registra resúmenes; no guarda
+contraseñas, SSID real, serial, datos internos ni token. La copia diagnóstica de
+las peticiones usa token=0 como marcador, mientras el socket usa el token real.
+CameraState expone solo authenticated; el token real permanece dentro del worker
+TCP de CameraClient y no entra en su StateFlow público. Las excepciones de Ajustes son mensajes
+controlados sin payload remoto. La configuración no se persiste.
+
+No se añaden modificaciones Wi-Fi, cambio PAL/NTSC, sincronización del reloj,
+format/erase/repair, firmware/factory reset, delete/upload, dev_functions,
+opciones expert, perfiles, automatización, persistencia ni Hito 7.
+
+### CUBIERTO POR TESTS
+
+- Parser de configuración, valores desconocidos, entradas inválidas, duplicados,
+  array vacío y param no-array; sanitización en modelos y diagnóstico.
+- settable exacto, dominios físicos, valores con espacios y mayúsculas, segmentos vacíos.
+- SET date y restauración off, GET de verificación, desacuerdo sin rollback,
+  rechazo -13, detalle -25, whitelist y valores inválidos bloqueados localmente.
+- Operaciones duplicadas, descarga/medios ocupados, grabación y fallo al parar preview.
+- Cambio de sesión, rotación lógica, abandono de descubrimiento y SET + VERIFY en background.
+- Servidor TCP local: tokens nuevos por sesión, GET consecutivos, SET, eventos
+  intercalados, rechazo local durante el lease de descarga y timeout.
+
+### Checklist físico pendiente — Hito 6
+
+- [ ] A — Conectar, abrir Ajustes y comprobar valores de vídeo (resolución/calidad/marca),
+  foto, buzzer y LED. No aparece contraseña Wi-Fi.
+- [ ] B — Cambiar manualmente video_stamp off → date; verificar UI y GET real.
+  Restaurar off y volver a verificar.
+- [ ] C — Cambiar manualmente auto_low_light on → off, verificar y restaurar on.
+- [ ] D — Cambiar buzzer_volume low → mute, verificar y restaurar low. Comprobar
+  físicamente el buzzer cuando corresponda.
+- [ ] E — Iniciar preview, abrir Ajustes y modificar una opción. Preview se detiene
+  limpiamente antes del SET y permanece detenido después.
+- [ ] F — Durante grabación no se permite SET y la grabación continúa. Tras detenerla
+  vuelve a permitirse la modificación.
+- [ ] G — Durante una descarga abrir Ajustes: refresh y SET bloqueados, descarga continúa.
+- [ ] H — Rotar en Ajustes: sin carga duplicada, nueva sesión ni valores incoherentes.
+- [ ] I — Enviar un SET y pulsar Home inmediatamente: el servicio termina SET + VERIFY
+  y al volver se muestra el resultado real.
+- [ ] J — Revisar diagnóstico copiado: sin claves/valores de contraseña, SSID real,
+  serial real ni token de sesión.
+
+El Hito 6 solo se marcará VALIDADO FÍSICAMENTE cuando el usuario supere A–J con
+la cámara real. El experimento 6.0 no sustituye la validación de esta pantalla.
+
 Verificación de entrega:
 
     ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug

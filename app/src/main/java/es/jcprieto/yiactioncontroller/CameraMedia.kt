@@ -62,8 +62,7 @@ internal class CameraMediaException(
 
 internal fun mediaAvailability(active: Boolean, blocked: Boolean, camera: CameraState): CameraMediaError? = when {
     blocked -> CameraMediaError.BLOCKED
-    !active || camera.connection != ConnectionStatus.CONNECTED || (camera.token
-        ?: 0) <= 0 -> CameraMediaError.DISCONNECTED
+    !active || camera.connection != ConnectionStatus.CONNECTED || !camera.authenticated -> CameraMediaError.DISCONNECTED
 
     camera.sdCard?.lowercase(Locale.ROOT) in setOf(
         "remove",

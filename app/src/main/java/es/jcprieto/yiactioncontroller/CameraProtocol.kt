@@ -20,7 +20,14 @@ internal data class CameraMessage(
     val listing: JsonElement? = null,
     val size: JsonElement? = null,
     @SerialName("rem_size") val remaining: JsonElement? = null,
-)
+) {
+    override fun toString(): String = buildJsonObject {
+        put("msg_id", messageId)
+        rval?.let { put("rval", it) }
+        type?.let { put("type", it) }
+        param?.let { put("param", it) }
+    }.let(::redactCameraElement).toString()
+}
 
 internal val cameraJson = Json { ignoreUnknownKeys = true }
 internal fun JsonElement?.text(): String? = (this as? JsonPrimitive)?.contentOrNull
@@ -29,7 +36,7 @@ enum class ConnectionStatus { DISCONNECTED, CONNECTING, AUTHENTICATING, CONNECTE
 
 data class CameraState(
     val connection: ConnectionStatus = ConnectionStatus.DISCONNECTED,
-    val token: Int? = null,
+    val authenticated: Boolean = false,
     val battery: Int? = null,
     val configuration: Map<String, String> = emptyMap(),
     val events: Map<String, String> = emptyMap(),
@@ -48,9 +55,12 @@ data class CameraState(
     val lastEvent: String? = null,
     val error: String? = null,
 ) {
+    override fun toString(): String =
+        "CameraState(connection=" + connection + ", configuration=" + configuration +
+                ", recording=" + recording + ", battery=" + battery + ", error=" + error + ")"
     val canSendCommand: Boolean
         get() = connection == ConnectionStatus.CONNECTED &&
-                token != null && token > 0 && pending.isEmpty() && pendingAction == null && !awaitingPreviewStop
+                authenticated && pending.isEmpty() && pendingAction == null && !awaitingPreviewStop
     val canTakePhoto: Boolean get() = canSendCommand
     val canStartRecording: Boolean get() = canSendCommand && recording == RecordingState.IDLE
 
@@ -69,7 +79,11 @@ data class CameraState(
     val cameraStatus: String? get() = field("app_status", "camera_status", "status")
 }
 
-internal fun CameraState.applyMessage(message: CameraMessage, raw: String): CameraState {
+internal fun CameraState.applyMessage(
+    message: CameraMessage,
+    raw: String,
+    fullConfiguration: Boolean = true
+): CameraState {
     val safeRaw = if (message.messageId == CameraCommand.LIST_DIRECTORY) buildJsonObject {
         put("msg_id", message.messageId)
         message.rval?.let { put("rval", it) }
@@ -85,21 +99,9 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
         val value = message.param.text()?.toIntOrNull()?.takeIf { it in 0..100 }
         next = next.copy(battery = value, error = if (value == null) "Batería no válida" else next.error)
     }
-    if (message.messageId == GET_CONFIG && message.rval == 0) {
-        val values = message.param?.let(::redactCameraElement) as? JsonArray
-            ?: error("La configuración no contiene un array en param")
-        val configuration = buildMap {
-            for (item in values) {
-                val obj = item as? JsonObject ?: error("Entrada de configuración no válida")
-                // Accept both {"sw_version":"..."} and {"key":"sw_version","value":"..."}.
-                val key = obj["key"].text()
-                if (key != null && "value" in obj) {
-                    put(key, obj.getValue("value").text() ?: obj.getValue("value").toString())
-                } else {
-                    obj.forEach { (name, value) -> put(name, value.text() ?: value.toString()) }
-                }
-            }
-        }
+    if (message.messageId == GET_CONFIG && message.rval == 0 && fullConfiguration) {
+        val configuration = parseCameraConfiguration(message.param, legacy = true)?.values
+            ?: return next.copy(error = "La configuración no contiene un array en param")
         next = next.copy(
             configuration = configuration.mapValues { (key, value) -> if (sensitiveCameraKey(key)) "[omitido]" else value },
             events = next.events - configuration.keys,
@@ -111,7 +113,7 @@ internal fun CameraState.applyMessage(message: CameraMessage, raw: String): Came
         else message.param.text() ?: message.param?.let(::redactCameraElement)?.toString()
         next = next.copy(
             lastEvent = safeRaw,
-            events = if (message.type != null && eventValue != null)
+            events = if (message.type != null && !sensitiveCameraKey(message.type) && eventValue != null)
                 next.events + (message.type to eventValue) else next.events,
         )
         next = when (message.type) {

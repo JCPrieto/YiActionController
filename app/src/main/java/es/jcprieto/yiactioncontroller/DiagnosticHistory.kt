@@ -45,7 +45,7 @@ class DiagnosticHistory(private val timestamp: () -> String = { OffsetDateTime.n
         val summary = buildJsonObject {
             put("msg_id", message.messageId)
             message.rval?.let { put("rval", it) }
-            message.type?.let { put("type", it) }
+            message.type?.takeUnless(::sensitiveCameraKey)?.let { put("type", it) }
             if (message.messageId == CameraCommand.GET_CONFIG) {
                 put("config_resumida", buildJsonObject {
                     (message.param as? JsonArray)?.forEach { item ->

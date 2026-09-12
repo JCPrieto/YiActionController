@@ -87,7 +87,8 @@ class CameraActionStateTest {
 
     @Test
     fun controlAvailabilityRequiresSessionTokenAndNoPendingWork() {
-        val idle = CameraState(connection = ConnectionStatus.CONNECTED, token = 9, recording = RecordingState.IDLE)
+        val idle =
+            CameraState(connection = ConnectionStatus.CONNECTED, authenticated = true, recording = RecordingState.IDLE)
         assertTrue(idle.canTakePhoto)
         assertTrue(idle.canStartRecording)
         assertFalse(idle.canStopRecording)
@@ -96,7 +97,7 @@ class CameraActionStateTest {
         assertTrue(unknown.canStopRecording)
         assertTrue(idle.copy(recording = RecordingState.RECORDING).canStopRecording)
         for (disabled in listOf(
-            idle.copy(token = null), idle.copy(token = 0),
+            idle.copy(authenticated = false),
             idle.copy(connection = ConnectionStatus.DISCONNECTED),
             idle.copy(pending = setOf(CameraCommand.GET_CONFIG)),
             idle.copy(pendingAction = CameraAction.TAKE_PHOTO)

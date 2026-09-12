@@ -69,7 +69,7 @@ class CameraMediaClientTest {
                         }
                         assertFalse(client.state.value.lastMessage.orEmpty().contains("private-file"))
                         client.disconnect()
-                        assertNull(client.state.value.token)
+                        assertFalse(client.state.value.authenticated)
                     }
                 }
             }
@@ -87,7 +87,7 @@ class CameraMediaClientTest {
                     peer.send("""{"msg_id":5,"rval":-4}""")
                     assertEquals(-4, (rejected.await().exceptionOrNull() as CameraMediaException).rval)
                     assertTrue(client.state.value.canSendCommand)
-                    assertEquals(31, client.state.value.token)
+                    assertTrue(client.state.value.authenticated)
                     val timeout =
                         async(Dispatchers.Unconfined) { runCatching { client.requestMedia(CameraMediaOperation.Free) } }
                     assertEquals("free", peer.request()["type"]!!.jsonPrimitive.content)
@@ -95,7 +95,7 @@ class CameraMediaClientTest {
                         CameraMediaError.TIMEOUT,
                         (withTimeout(4000) { timeout.await() }.exceptionOrNull() as CameraMediaException).kind
                     )
-                    assertNull(client.state.value.token)
+                    assertFalse(client.state.value.authenticated)
                     assertTrue(client.state.value.pending.isEmpty())
                 }
             }
