@@ -42,6 +42,8 @@ class CameraConnectionServiceContractTest {
         assertTrue(service.contains("CameraWifiConnectionManager("))
         assertTrue(service.contains("recovery.binding?.previewTransport"))
         assertTrue(viewModel.contains("currentPreviewTransport()"))
+        assertTrue(viewModel.contains("canRestart = { service.value?.canRestartPreview() == true }"))
+        assertTrue(service.contains("internal fun canRestartPreview(): Boolean = previewRecoveryAllowed("))
         val cleared = viewModel.substringAfter("override fun onCleared()")
         assertTrue(cleared.contains("unbind()"))
         assertTrue(cleared.contains("preview.release()"))

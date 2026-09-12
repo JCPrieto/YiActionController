@@ -66,10 +66,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         connected = { service.value?.cameraState?.value?.connection == ConnectionStatus.CONNECTED },
         startControl = { service.value?.startPreview() ?: unavailable() },
         stopControl = { service.value?.stopPreview() ?: unavailable() },
-        canRestart = {
-            state.value.canSendCommand && state.value.recording == RecordingState.IDLE &&
-                    wifiStatus.value.state != CameraWifiState.BLOCKED
-        },
+        canRestart = { service.value?.canRestartPreview() == true },
         stopAndConfirm = { service.value?.stopPreviewAndAwaitVfStop() ?: unavailable() },
     )
     val previewState = preview.status

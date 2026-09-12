@@ -18,6 +18,11 @@ data class PreviewTransport(
 enum class PreviewState { IDLE, STARTING, PLAYING, BUFFERING, STOPPING, ERROR }
 enum class PreviewError { START_CONTROL, STOP_CONTROL, RTSP, RTSP_TIMEOUT, MEDIA3, NETWORK_NOT_FOUND, NETWORK_LOST, CAMERA_DISCONNECTED }
 enum class PreviewControlState { UNKNOWN, START_ACCEPTED, STOP_ACCEPTED }
+
+/** Called with the owner's live state, never an asynchronously mirrored UI snapshot. */
+internal fun previewRecoveryAllowed(camera: CameraState, networkReady: Boolean, controlAvailable: Boolean): Boolean =
+    networkReady && controlAvailable && camera.canSendCommand && camera.recording == RecordingState.IDLE
+
 data class PreviewStatus(
     val state: PreviewState = PreviewState.IDLE,
     val error: String? = null,

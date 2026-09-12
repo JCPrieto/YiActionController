@@ -306,6 +306,12 @@ class CameraConnectionService : Service() {
     internal fun currentPreviewTransport(): PreviewTransport? =
         if (active.value && wifiStatus.value.state == CameraWifiState.CONNECTED) recovery.binding?.previewTransport else null
 
+    internal fun canRestartPreview(): Boolean = previewRecoveryAllowed(
+        cameraState.value,
+        currentPreviewTransport() != null,
+        canControl() && !mediaState.value.loading,
+    )
+
     private fun canControl() =
         active.value && wifiStatus.value.state != CameraWifiState.BLOCKED && !downloader.busy && !explicitDownloadPending &&
                 !settings.state.value.busy

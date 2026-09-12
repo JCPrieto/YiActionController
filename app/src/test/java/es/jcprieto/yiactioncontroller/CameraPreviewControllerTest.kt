@@ -11,6 +11,62 @@ import javax.net.SocketFactory
 
 class CameraPreviewControllerTest {
     @Test
+    fun recoveryUsesLiveOwnerStateWhenUiStillShowsAwaitingStop() = runBlocking {
+        val live = kotlinx.coroutines.flow.MutableStateFlow(
+            CameraState(connection = ConnectionStatus.CONNECTED, authenticated = true, recording = RecordingState.IDLE)
+        )
+        var uiSnapshot = live.value
+        val engine = FakePlayback()
+        var starts = 0
+        val confirmed = CompletableDeferred<Unit>()
+        val controller = CameraPreviewController(
+            this, engine, { true }, {
+            starts++
+            if (starts == 1) CameraControlResult(false, "rval=-21", -21) else CameraControlResult(true)
+        }, { CameraControlResult(true) },
+            { previewRecoveryAllowed(live.value, networkReady = true, controlAvailable = true) },
+            {
+                live.value = live.value.copy(awaitingPreviewStop = true)
+                uiSnapshot = live.value
+                confirmed.await()
+                // CameraClient's finally clears the reservation before returning; UI collection can lag.
+                live.value = live.value.copy(awaitingPreviewStop = false)
+                CameraControlResult(true)
+            })
+        try {
+            controller.start(transport); yield()
+            controller.restart(transport); yield()
+            assertEquals(1, starts)
+            confirmed.complete(Unit); yield()
+            assertFalse(uiSnapshot.canSendCommand)
+            assertTrue(live.value.canSendCommand)
+            assertEquals(2, starts)
+            assertEquals(1, engine.starts)
+            assertNull(controller.status.value.errorType)
+        } finally {
+            controller.release()
+        }
+    }
+
+    @Test
+    fun liveRecoveryGuardStillRejectsActualBusyRecordingAndUnavailableNetwork() {
+        val ready =
+            CameraState(connection = ConnectionStatus.CONNECTED, authenticated = true, recording = RecordingState.IDLE)
+        assertTrue(previewRecoveryAllowed(ready, true, true))
+        for (recording in listOf(
+            RecordingState.UNKNOWN,
+            RecordingState.STARTING,
+            RecordingState.RECORDING,
+            RecordingState.STOPPING
+        ))
+            assertFalse(previewRecoveryAllowed(ready.copy(recording = recording), true, true))
+        assertFalse(previewRecoveryAllowed(ready.copy(awaitingPreviewStop = true), true, true))
+        assertFalse(previewRecoveryAllowed(ready.copy(pending = setOf(CameraCommand.GET_CONFIG)), true, true))
+        assertFalse(previewRecoveryAllowed(ready, false, true))
+        assertFalse(previewRecoveryAllowed(ready, true, false))
+    }
+
+    @Test
     fun explicitRecoveryWaitsForConfirmedStopAndNewStartAck() = runBlocking {
         val engine = FakePlayback()
         val confirmed = CompletableDeferred<CameraControlResult>()

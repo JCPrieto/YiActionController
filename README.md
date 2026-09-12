@@ -1102,12 +1102,20 @@ opciones expert, perfiles, automatización, persistencia ni Hito 7.
 
 ### Checklist físico pendiente — Hito 6
 
-- [ ] A — Conectar, abrir Ajustes y comprobar valores de vídeo (resolución/calidad/marca),
+A–D superadas según el usuario (12/09/2026). E sigue pendiente: tras un 259/-21,
+la recuperación recibió ACK 260 y vf_stop, pero terminó localmente en STOP_CONTROL
+sin enviar 259. Se corrigió la comprobación que consultaba el estado replicado
+del ViewModel: ahora consulta directamente el estado del servicio, evitando que
+una copia todavía marcada awaitingPreviewStop bloquee la continuación.
+Una prueba JVM reproduce ese desfase. Pendiente repetir la recuperación hasta
+PLAYING y después la prueba E completa con un SET desde Ajustes.
+
+- [x] A — Conectar, abrir Ajustes y comprobar valores de vídeo (resolución/calidad/marca),
   foto, buzzer y LED. No aparece contraseña Wi-Fi.
-- [ ] B — Cambiar manualmente video_stamp off → date; verificar UI y GET real.
+- [x] B — Cambiar manualmente video_stamp off → date; verificar UI y GET real.
   Restaurar off y volver a verificar.
-- [ ] C — Cambiar manualmente auto_low_light on → off, verificar y restaurar on.
-- [ ] D — Cambiar buzzer_volume low → mute, verificar y restaurar low. Comprobar
+- [x] C — Cambiar manualmente auto_low_light on → off, verificar y restaurar on.
+- [x] D — Cambiar buzzer_volume low → mute, verificar y restaurar low. Comprobar
   físicamente el buzzer cuando corresponda.
 - [ ] E — Iniciar preview, abrir Ajustes y modificar una opción. Preview se detiene
   limpiamente antes del SET y permanece detenido después.
