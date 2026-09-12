@@ -867,7 +867,25 @@ El md5sum del evento tiene semántica no confirmada: no coincidió con el MD5
 de los fragmentos aun cuando la reconstrucción fue correcta. No se usa para
 validación; el diagnóstico solo informa de su presencia.
 
-### Implementado — pendiente de prueba física A–H
+### Implementado — A–H validadas físicamente; incidencia de notificación en seguimiento
+
+El usuario comunica que todas las pruebas físicas A–H han sido superadas.
+Cancelar desde la aplicación y Desconectar desde la notificación funcionan.
+Se detectó una incidencia adicional: «Cancelar descarga» desde la notificación
+no produce efecto. No se considera validada esa acción hasta repetirla.
+
+Se limita la actualización del progreso de la notificación a una vez por segundo,
+sin republicar porcentajes idénticos. Los cambios de estado/acciones son inmediatos.
+La reconstrucción frecuente era un riesgo identificado, no una causa física
+confirmada del fallo. Android advierte que puede descartar actualizaciones demasiado
+frecuentes
+([documentación de notificaciones](https://developer.android.com/develop/ui/compose/notifications/create-notification)).
+El servicio registra «DOWNLOAD Cancelar recibido desde notificación; estado=…»
+antes de llamar a la misma cancelación utilizada por la UI.
+Pendiente: durante un MP4, cancelar desde la notificación con la app en segundo
+plano; comprobar esa entrada, cierre de 8787, parcial reanudable y Wi-Fi/TCP vivos.
+Si la pulsación sigue sin efecto, copiar el diagnóstico para distinguir entrega
+de la acción frente a ejecución de la cancelación.
 
 CameraConnectionService posee CameraMediaDownloader. La UI observa su estado;
 rotación, Home o abrir otra app no cancelan la transferencia. Se conserva el
@@ -955,7 +973,7 @@ MediaPublisher se sustituye en JVM para verificar fallos y reintento de
 publicación sin volver a abrir el socket. MediaStore real, notificación, visor
 externo y callbacks Android se comprueban físicamente.
 
-### Matriz física pendiente — Hito 5B
+### Matriz física superada — Hito 5B
 
 | Prueba          | Pasos y resultado esperado                                                                                                                           |
 |-----------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -968,7 +986,9 @@ externo y callbacks Android se comprueban físicamente.
 | G — Rotación    | Rotar descargando. Progreso coherente, sin reinicio ni socket duplicado.                                                                             |
 | H — Desconectar | Pulsar Desconectar en notificación durante descarga. Comprobar cierre de datos/control, liberación Wi-Fi y servicio parado.                          |
 
-El Hito 5B solo se marcará físicamente validado tras superar A–H con la cámara.
+Las pruebas A–H están físicamente validadas según el resultado comunicado por el
+usuario. La corrección preventiva de Cancelar desde la notificación requiere
+una prueba adicional; no se da por resuelta por los tests JVM.
 Verificación de entrega:
 
     ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug

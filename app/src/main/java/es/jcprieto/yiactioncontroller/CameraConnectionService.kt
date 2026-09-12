@@ -31,6 +31,7 @@ class CameraConnectionService : Service() {
     private var manualJob: Job? = null
     private var awaitingCredentials: Job? = null
     private var cleaning = false
+    private val notificationUpdates = CameraNotificationUpdates()
     private val previewClients = mutableMapOf<Any, (Boolean) -> Unit>()
     private val previewStoppers = mutableMapOf<Any, suspend () -> Boolean>()
     private var explicitDownloadPending = false
@@ -181,7 +182,13 @@ class CameraConnectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CANCEL_DOWNLOAD -> cancelDownload()
+            ACTION_CANCEL_DOWNLOAD -> {
+                diagnostics.append(
+                    "DOWNLOAD",
+                    "Cancelar recibido desde notificación; estado=" + downloadStatus.value.state
+                )
+                cancelDownload()
+            }
             ACTION_DISCONNECT -> disconnect()
             ACTION_CONNECT -> {
                 if (!active.value) {
@@ -341,6 +348,7 @@ class CameraConnectionService : Service() {
             manual?.close(); manual = null
             if (active.value) diagnostics.append("SERVICE", "Detenido")
             mutableActive.value = false
+            notificationUpdates.reset()
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
         } finally {
@@ -387,6 +395,13 @@ class CameraConnectionService : Service() {
 
     private fun updateNotification() {
         if (!active.value) return
+        val download = downloadStatus.value
+        // Phase/action changes are immediate; byte progress alone is limited to once per second.
+        val key = listOf(
+            download.state, download.remotePath, wifiStatus.value.state,
+            cameraState.value.connection, cameraState.value.error
+        ).joinToString("|")
+        if (!notificationUpdates.shouldPublish(key, download.percent, android.os.SystemClock.elapsedRealtime())) return
         val text = when {
             downloadStatus.value.busy -> "Descargando " + downloadStatus.value.fileName + " · " + downloadStatus.value.percent + " %"
             wifiStatus.value.state == CameraWifiState.BLOCKED -> "Conexión con cámara temporalmente bloqueada"
